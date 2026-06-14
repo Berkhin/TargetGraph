@@ -9,6 +9,7 @@ env/
 .venv/
 alembic/versions/*_local.py  # Если будут локальные черновые миграции
 .pytest_cache/
+*.egg-info/
 
 # =========================
 # 2. Node.js / React (Vite)

@@ -1,0 +1,28 @@
+[project]
+name = "targetgraph-backend"
+version = "0.1.0"
+description = "TargetGraph.io backend — autonomous job-application engine."
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    # Email Discovery & Verification Engine
+    "dnspython>=2.6",         # async MX resolution (dns.asyncresolver)
+    "aiosmtplib>=3.0",        # async SMTP client with sock= injection
+    "python-socks>=2.4",      # SOCKS5 tunnel (async asyncio backend)
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
