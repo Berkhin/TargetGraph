@@ -1,0 +1,8 @@
+# Pinned-floor runtime deps for the email-verification engine and its host app.
+# Mirrors [project.dependencies] in pyproject.toml for plain `pip install -r`.
+fastapi>=0.115
+pydantic>=2.7
+pydantic-settings>=2.3
+dnspython>=2.6
+aiosmtplib>=3.0
+python-socks>=2.4
