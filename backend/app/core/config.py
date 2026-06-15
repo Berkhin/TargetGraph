@@ -11,10 +11,16 @@ unit-testable (you can inject a custom :class:`EmailVerificationSettings`).
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 from urllib.parse import quote_plus
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Absolute path to the project-root ``.env`` so settings resolve identically
+# whether a process is launched from the repo root, the ``backend`` directory,
+# or via ``python -m scripts.*``. (config.py lives at backend/app/core/.)
+_ENV_FILE = Path(__file__).resolve().parents[3] / ".env"
 
 
 class EmailVerificationSettings(BaseSettings):
@@ -27,7 +33,7 @@ class EmailVerificationSettings(BaseSettings):
 
     model_config = SettingsConfigDict(
         env_prefix="EMAIL_VERIFY_",
-        env_file=".env",
+        env_file=_ENV_FILE,
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -120,7 +126,7 @@ class DatabaseSettings(BaseSettings):
     """
 
     model_config = SettingsConfigDict(
-        env_file=".env", env_file_encoding="utf-8", extra="ignore"
+        env_file=_ENV_FILE, env_file_encoding="utf-8", extra="ignore"
     )
 
     postgres_user: str = Field(default="postgres", validation_alias="POSTGRES_USER")
@@ -153,3 +159,58 @@ class DatabaseSettings(BaseSettings):
 def get_database_settings() -> DatabaseSettings:
     """Return a process-wide cached database settings instance."""
     return DatabaseSettings()
+
+
+class AISettings(BaseSettings):
+    """LLM / Gemini settings for the LangGraph matching pipeline.
+
+    The API key is read from ``GEMINI_API_KEY`` to match the repository's
+    ``.env`` (the official ``langchain-google-genai`` integration also honours
+    ``GOOGLE_API_KEY``/``GEMINI_API_KEY`` from the environment, but we pass the
+    key explicitly so the client never depends on ambient process state).
+    """
+
+    model_config = SettingsConfigDict(
+        env_file=_ENV_FILE, env_file_encoding="utf-8", extra="ignore"
+    )
+
+    gemini_api_key: str = Field(
+        default="",
+        validation_alias="GEMINI_API_KEY",
+        description="Google Gemini API key (Generative Language API).",
+    )
+    gemini_model: str = Field(
+        default="gemini-3.1-flash-lite",
+        validation_alias="GEMINI_MODEL",
+        description="Gemini model id used by ChatGoogleGenerativeAI.",
+    )
+    gemini_temperature: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=2.0,
+        validation_alias="GEMINI_TEMPERATURE",
+        description="Sampling temperature; 0.0 for deterministic extraction.",
+    )
+
+    @model_validator(mode="after")
+    def _require_api_key(self) -> "AISettings":
+        """Fail fast on a missing key.
+
+        Without this, ``ChatGoogleGenerativeAI`` still constructs with an empty
+        key and only fails (with ``Unauthenticated``) on every ``ainvoke`` —
+        which the node swallows, so the pipeline silently extracts nothing. We
+        surface the misconfiguration at settings-load time instead. Unit tests
+        that don't need a real key should construct ``AISettings(
+        gemini_api_key="test-key")`` directly rather than via ``get_ai_settings``.
+        """
+        if not self.gemini_api_key.strip():
+            raise ValueError(
+                "GEMINI_API_KEY is required but not set. Add it to your .env file."
+            )
+        return self
+
+
+@lru_cache
+def get_ai_settings() -> AISettings:
+    """Return a process-wide cached AI settings instance."""
+    return AISettings()

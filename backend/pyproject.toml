@@ -16,6 +16,10 @@ dependencies = [
     "dnspython>=2.6",         # async MX resolution (dns.asyncresolver)
     "aiosmtplib>=3.0",        # async SMTP client with sock= injection
     "python-socks>=2.4",      # SOCKS5 tunnel (async asyncio backend)
+    # AI Pipeline
+    "langgraph>=0.2,<0.3",    # stateful orchestrator (StateGraph + Pydantic state)
+    # 2.x targets langchain-core 0.3.x, staying compatible with the langgraph<0.3 pin.
+    "langchain-google-genai>=2.0,<3.0",  # official Gemini chat integration (ChatGoogleGenerativeAI)
 ]
 
 [project.optional-dependencies]
