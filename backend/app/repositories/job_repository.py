@@ -35,6 +35,16 @@ class JobRepository(BaseRepository):
         entity = await self._session.get(JobPosting, job_id)
         return JobRead.model_validate(entity) if entity is not None else None
 
+    async def get_by_source_job_id(self, source_job_id: str) -> JobRead | None:
+        """Return the posting with ``source_job_id``, or ``None`` if absent.
+
+        Used by the sourcing task to deduplicate against postings already
+        ingested in a previous run (the column carries a unique index).
+        """
+        stmt = select(JobPosting).where(JobPosting.source_job_id == source_job_id)
+        entity = (await self._session.scalars(stmt)).first()
+        return JobRead.model_validate(entity) if entity is not None else None
+
     async def get_by_status(self, status: JobStatus) -> list[JobRead]:
         """Return postings in ``status``, newest first."""
         stmt = (

@@ -50,6 +50,21 @@ class ProfileRepository(BaseRepository):
             )
         return profile
 
+    async def get_all_profiles(self) -> list[ProfileRead]:
+        """Return every master profile with its children eagerly loaded.
+
+        Uses the same ``selectinload`` path as :meth:`get_full_profile` (the
+        async-safe pattern), so the sourcing task can read each profile's
+        ``target_titles`` and ``preferences`` without tripping the ``lazy="raise"``
+        guard on the relationships.
+        """
+        stmt = select(MasterProfile).options(
+            selectinload(MasterProfile.experiences),
+            selectinload(MasterProfile.skills),
+        )
+        entities = (await self._session.scalars(stmt)).all()
+        return [ProfileRead.model_validate(entity) for entity in entities]
+
     async def get_full_profile(self, profile_id: uuid.UUID) -> ProfileRead | None:
         """Return the profile with all experiences and skills eagerly loaded.
 

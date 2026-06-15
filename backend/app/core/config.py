@@ -214,3 +214,78 @@ class AISettings(BaseSettings):
 def get_ai_settings() -> AISettings:
     """Return a process-wide cached AI settings instance."""
     return AISettings()
+
+
+class SourcingSettings(BaseSettings):
+    """Settings for the autonomous job-sourcing layer (Google Jobs via SerpAPI).
+
+    Drives :func:`app.services.sourcing.fetch_jobs_from_google` and the periodic
+    :func:`app.tasks.sourcing_task.run_sourcing_job` task. The ``SERPAPI_KEY`` is
+    required and validated at load time so the application fails fast at start-up
+    rather than silently no-op'ing every scheduled run (mirrors :class:`AISettings`).
+    """
+
+    model_config = SettingsConfigDict(
+        env_file=_ENV_FILE, env_file_encoding="utf-8", extra="ignore"
+    )
+
+    serpapi_key: str = Field(
+        default="",
+        validation_alias="SERPAPI_KEY",
+        description="SerpAPI API key used for the Google Jobs engine.",
+    )
+    serpapi_base_url: str = Field(
+        default="https://serpapi.com/search.json",
+        validation_alias="SERPAPI_BASE_URL",
+        description="SerpAPI search endpoint.",
+    )
+    request_timeout_seconds: float = Field(
+        default=20.0,
+        gt=0,
+        validation_alias="SOURCING_REQUEST_TIMEOUT_SECONDS",
+        description="Per-request timeout for SerpAPI HTTP calls.",
+    )
+    default_location: str = Field(
+        default="United States",
+        validation_alias="SOURCING_LOCATION",
+        description="Fallback search location when a profile has none set.",
+    )
+    interval_hours: int = Field(
+        default=6,
+        ge=1,
+        validation_alias="SOURCING_INTERVAL_HOURS",
+        description="How often the sourcing job runs, in hours.",
+    )
+    pages_per_query: int = Field(
+        default=3,
+        ge=1,
+        le=20,
+        validation_alias="SOURCING_PAGES_PER_QUERY",
+        description=(
+            "Max SerpAPI result pages to follow per query via next_page_token "
+            "(~10 jobs/page). Google deprecated the 'start' offset; pagination "
+            "is token-based."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _require_api_key(self) -> "SourcingSettings":
+        """Fail fast on a missing key.
+
+        Without a key every SerpAPI call returns an error, so a scheduled run
+        would loop, log failures, and add nothing. We surface the
+        misconfiguration at settings-load (start-up) time instead. Unit tests
+        that don't need a real key should construct ``SourcingSettings(
+        serpapi_key="test-key")`` directly rather than via ``get_sourcing_settings``.
+        """
+        if not self.serpapi_key.strip():
+            raise ValueError(
+                "SERPAPI_KEY is required but not set. Add it to your .env file."
+            )
+        return self
+
+
+@lru_cache
+def get_sourcing_settings() -> SourcingSettings:
+    """Return a process-wide cached sourcing settings instance."""
+    return SourcingSettings()

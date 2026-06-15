@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from app.db.base import Base
-from app.models.sql import JobPosting  # noqa: F401 - registers the table on metadata
+import app.models.sql  # noqa: F401 - registers every table on Base.metadata
 
 
 @pytest_asyncio.fixture

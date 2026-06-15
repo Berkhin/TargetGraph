@@ -32,6 +32,9 @@ class JobCreate(JobBase):
     status: JobStatus = JobStatus.NEW
     match_score: int | None = Field(default=None, ge=0, le=100)
     cover_letter_draft: str | None = None
+    # Stable provider id for dedup (e.g. SerpAPI google_jobs job_id); None for
+    # manually-created postings.
+    source_job_id: str | None = Field(default=None, max_length=512)
 
 
 class JobUpdate(BaseModel):
@@ -55,6 +58,7 @@ class JobRead(JobBase):
     status: JobStatus
     match_score: int | None
     cover_letter_draft: str | None
+    source_job_id: str | None
     created_at: datetime.datetime
     updated_at: datetime.datetime
 
