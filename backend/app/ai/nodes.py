@@ -18,7 +18,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from app.ai.llm import get_llm
-from app.ai.state import ExtractedRequirements, GraphState
+from app.ai.state import ExtractedRequirements, GeneratedDocuments, GraphState
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -81,6 +81,37 @@ _MATCH_SYSTEM_PROMPT = (
 )
 
 
+# System prompt for the drafting node. The model speaks AS the candidate (first
+# person), so the persona and the no-fabrication rule are the load-bearing parts:
+# ``with_structured_output`` only guarantees we get a ``cover_letter`` string back,
+# it cannot stop the model inventing experience. The three-paragraph contract and
+# the "only what the profile states" rule keep the letter short and truthful.
+_DRAFT_SYSTEM_PROMPT = (
+    "You are the candidate, writing your own cover letter for the job below. "
+    "Write in the first person.\n"
+    "Adopt the professional identity, role, and seniority that the CANDIDATE "
+    "PROFILE actually supports — never claim a title, seniority, or specialism "
+    "the profile does not back up.\n"
+    "Structure: exactly three short paragraphs.\n"
+    "1. A sharp hook stating, concretely, why you are an excellent fit for this "
+    "specific role.\n"
+    "2. Specific evidence drawn from your PROFILE that satisfies the job's "
+    "REQUIREMENTS — prioritise the hard skills. Name the technologies and the "
+    "concrete work that demonstrates them.\n"
+    "3. A clear call to action (e.g. inviting a conversation / interview).\n"
+    "If REVIEWER FEEDBACK is provided, treat your PREVIOUS DRAFT as the starting "
+    "point and revise it to address every point of feedback, keeping the rules "
+    "below.\n"
+    "Hard rules:\n"
+    "- NEVER invent experience, skills, employers, titles, or achievements that "
+    "are not stated in the PROFILE. Use only what the profile actually contains.\n"
+    "- Keep it concise: three paragraphs maximum, no padding.\n"
+    "- Tone: professional, technical, matter-of-fact. No flattery, no clichés, "
+    "no exclamation marks, no emotional filler.\n"
+    "- Write in the language of the job posting."
+)
+
+
 # System prompt for the extraction node. Kept terse and imperative — the JSON
 # shape itself is enforced by ``with_structured_output``, so the prompt only
 # needs to define *what* belongs in each bucket and the language policy. The
@@ -120,6 +151,16 @@ def _get_match_chain():
     LLM must also call ``_get_match_chain.cache_clear()``.
     """
     return get_llm().with_structured_output(MatchResult)
+
+
+@lru_cache(maxsize=1)
+def _get_draft_chain():
+    """Return the cached structured-output chain for document drafting.
+
+    Same caching contract as :func:`_get_extraction_chain`: tests swapping the
+    LLM must also call ``_get_draft_chain.cache_clear()``.
+    """
+    return get_llm().with_structured_output(GeneratedDocuments)
 
 
 def _dedupe(items: list[str]) -> list[str]:
@@ -248,12 +289,89 @@ async def match_profile(state: GraphState) -> dict:
     }
 
 
-def draft_documents(state: GraphState) -> dict:
-    """Draft the resume and cover letter (and bump the revision counter)."""
+async def draft_documents(state: GraphState) -> dict:
+    """Draft the cover letter via Gemini (and bump the revision counter).
+
+    The model writes in the first person as the candidate, grounded strictly in
+    ``profile_text`` and the requirements ``extract_requirements`` already
+    surfaced — the system prompt forbids inventing experience. The revision
+    counter is still incremented here so ``should_revise``'s cap keeps bounding
+    the draft/review loop. Any failure (API unavailable, invalid / empty model
+    response) is logged and degrades to a placeholder so the graph can still
+    route on to review and terminate.
+    """
     logger.info("node", extra={"node": "draft_documents"})
+
+    # The placeholder + bumped counter every early/error path returns. The bump
+    # is mandatory: ``should_revise`` only terminates the draft/review loop once
+    # ``revision_number`` hits its cap, so a path that skips it could spin.
+    def _fallback() -> dict:
+        return {
+            "cover_letter_draft": "Error generating document.",
+            "revision_number": state.revision_number + 1,
+        }
+
+    # Refuse to write without grounding. A cover letter is pure fabrication
+    # without a profile to draw from, and untailorable without a job posting —
+    # no prompt rule stops the model inventing both, so we guard like the sibling
+    # nodes do rather than spend an API call that can only hallucinate.
+    if not state.profile_text or not state.profile_text.strip():
+        logger.warning("draft_documents.empty_profile_text")
+        return _fallback()
+    if not state.job_text or not state.job_text.strip():
+        logger.warning("draft_documents.empty_job_text")
+        return _fallback()
+
+    # Hand the model the same three inputs the prompt promises: the vacancy, the
+    # candidate profile, and the requirements isolated on the previous step
+    # (tagged by criticality so the letter can lead with the hard skills).
+    reqs = state.extracted_requirements
+    requirement_lines = [
+        *(f"- [HARD] {s}" for s in reqs.hard_skills),
+        *(f"- [soft] {s}" for s in reqs.soft_skills),
+        *(f"- [resp] {s}" for s in reqs.core_responsibilities),
+    ]
+    requirements_block = "\n".join(requirement_lines) or "(none extracted)"
+    human_content = (
+        f"JOB POSTING:\n{state.job_text}\n\n"
+        f"EXTRACTED REQUIREMENTS:\n{requirements_block}\n\n"
+        f"CANDIDATE PROFILE:\n{state.profile_text}"
+    )
+
+    # On a revision pass ``should_revise`` routes us back here with the reviewer's
+    # comments and the prior draft. Feed both in so the model actually improves
+    # the letter instead of regenerating an identical one (low temperature) and
+    # burning a revision on it. On the first pass both are empty -> skipped.
+    if state.review_comments:
+        feedback_block = "\n".join(f"- {c}" for c in state.review_comments)
+        human_content += (
+            f"\n\nPREVIOUS DRAFT:\n{state.cover_letter_draft or ''}"
+            f"\n\nREVIEWER FEEDBACK (address every point):\n{feedback_block}"
+        )
+
+    logger.info("draft_documents.prompt", extra={"chars": len(human_content)})
+
+    try:
+        structured_llm = _get_draft_chain()
+        messages = [
+            SystemMessage(content=_DRAFT_SYSTEM_PROMPT),
+            HumanMessage(content=human_content),
+        ]
+        result: GeneratedDocuments | None = await structured_llm.ainvoke(messages)
+    except Exception:  # noqa: BLE001 — node must never crash the graph
+        logger.exception("draft_documents.failed")
+        return _fallback()
+
+    # Treat a missing or blank letter as a failure: structured output can return
+    # an empty ``cover_letter`` that would otherwise be reported as success and
+    # shown to the user as an empty draft.
+    if result is None or not result.cover_letter.strip():
+        logger.warning("draft_documents.no_structured_output")
+        return _fallback()
+
+    logger.info("draft_documents.done")
     return {
-        "resume_draft": None,
-        "cover_letter_draft": None,
+        "cover_letter_draft": result.cover_letter,
         "revision_number": state.revision_number + 1,
     }
 
