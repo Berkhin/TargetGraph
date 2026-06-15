@@ -53,6 +53,23 @@ class MatchResult(BaseModel):
     )
 
 
+class ReviewResult(BaseModel):
+    """Structured output target for the ``reviewer`` node.
+
+    Captures whether the draft cover letter is ready for submission and any
+    factual or stylistic issues that need addressing. An empty ``comments``
+    list signals approval.
+    """
+
+    is_approved: bool = Field(
+        description="True if the cover letter is ready to send (no hallucinations, professional tone).",
+    )
+    comments: list[str] = Field(
+        default_factory=list,
+        description="Specific hallucinations, fabrications, or stylistic issues (empty if approved).",
+    )
+
+
 # System prompt for the match node. The recruiter persona plus the explicit
 # anti-inflation rule are load-bearing: ``with_structured_output`` enforces the
 # JSON shape, but only the prompt keeps the score realistic — a low-temperature
@@ -131,6 +148,32 @@ _EXTRACT_SYSTEM_PROMPT = (
 )
 
 
+# System prompt for the review node. Strict fact-checking only: the model must
+# catch fabrications and unsupported claims grounded in the profile. Styling and
+# tone are outside scope — the loop should converge on facts, not synonyms.
+_REVIEW_SYSTEM_PROMPT = (
+    "You are a Strict Fact-Checker reviewing a cover letter draft. "
+    "Your role: identify EVERY hallucination, fabrication, or unsupported claim.\n"
+    "You are given the COVER LETTER DRAFT, the CANDIDATE PROFILE, and the JOB "
+    "REQUIREMENTS that were extracted from the posting.\n"
+    "Rules:\n"
+    "- Compare the draft WORD FOR WORD against the PROFILE. Flag ANY skill, title, "
+    "employer, achievement, or experience mentioned in the draft that does NOT "
+    "appear in the profile.\n"
+    "- A fabrication is anything not directly stated in the profile, no matter how "
+    "plausible or adjacent (e.g. claiming 'Django' experience when the profile only "
+    "mentions 'FastAPI').\n"
+    "- IGNORE tone, style, clichés, and emotional language — ONLY flag facts that "
+    "contradict the profile or are completely unsupported.\n"
+    "- If the draft is accurate and grounded in the profile, "
+    "set is_approved=true and leave comments empty.\n"
+    "- If there are FACTUAL issues, set is_approved=false and list each problem as a "
+    "specific, actionable comment (e.g. 'Fabrication: claims 5 years of Python but "
+    "profile shows 2 years').\n"
+    "- Be strict about facts, lenient about style."
+)
+
+
 @lru_cache(maxsize=1)
 def _get_extraction_chain():
     """Return the cached structured-output chain (base LLM + schema binding).
@@ -161,6 +204,16 @@ def _get_draft_chain():
     LLM must also call ``_get_draft_chain.cache_clear()``.
     """
     return get_llm().with_structured_output(GeneratedDocuments)
+
+
+@lru_cache(maxsize=1)
+def _get_review_chain():
+    """Return the cached structured-output chain for reviewing drafts.
+
+    Same caching contract as :func:`_get_extraction_chain`: tests swapping the
+    LLM must also call ``_get_review_chain.cache_clear()``.
+    """
+    return get_llm().with_structured_output(ReviewResult)
 
 
 def _dedupe(items: list[str]) -> list[str]:
@@ -302,14 +355,10 @@ async def draft_documents(state: GraphState) -> dict:
     """
     logger.info("node", extra={"node": "draft_documents"})
 
-    # The placeholder + bumped counter every early/error path returns. The bump
-    # is mandatory: ``should_revise`` only terminates the draft/review loop once
-    # ``revision_number`` hits its cap, so a path that skips it could spin.
+    # The placeholder every early/error path returns. The revision counter is
+    # incremented only in the reviewer node (the loop's exit point), not here.
     def _fallback() -> dict:
-        return {
-            "cover_letter_draft": "Error generating document.",
-            "revision_number": state.revision_number + 1,
-        }
+        return {"cover_letter_draft": "Error generating document."}
 
     # Refuse to write without grounding. A cover letter is pure fabrication
     # without a profile to draw from, and untailorable without a job posting —
@@ -370,24 +419,91 @@ async def draft_documents(state: GraphState) -> dict:
         return _fallback()
 
     logger.info("draft_documents.done")
+    return {"cover_letter_draft": result.cover_letter}
+
+
+async def reviewer(state: GraphState) -> dict:
+    """Fact-check the cover letter draft against the profile via Gemini.
+
+    Sends the draft, candidate profile, and extracted requirements to the model
+    with structured output, returning approval status and any comments about
+    hallucinations, fabrications, or tone issues. Any failure (API unavailable,
+    invalid / empty model response) is logged and degrades to approved (empty
+    comments) so the graph can still route safely to the end.
+    """
+    logger.info("node", extra={"node": "reviewer"})
+
+    # Guard against empty draft: skip review if there is nothing to review.
+    if not state.cover_letter_draft or not state.cover_letter_draft.strip():
+        logger.warning("reviewer.empty_draft")
+        return {"review_comments": []}
+
+    # Guard against missing profile: cannot fact-check without grounding.
+    if not state.profile_text or not state.profile_text.strip():
+        logger.warning("reviewer.empty_profile_text")
+        return {"review_comments": []}
+
+    # Build the human prompt: draft, profile, and extracted requirements so the
+    # reviewer can check against all three sources.
+    reqs = state.extracted_requirements
+    requirement_lines = [
+        *(f"- [HARD] {s}" for s in reqs.hard_skills),
+        *(f"- [soft] {s}" for s in reqs.soft_skills),
+        *(f"- [resp] {s}" for s in reqs.core_responsibilities),
+    ]
+    requirements_block = "\n".join(requirement_lines) or "(none extracted)"
+    human_content = (
+        f"COVER LETTER DRAFT:\n{state.cover_letter_draft}\n\n"
+        f"EXTRACTED REQUIREMENTS:\n{requirements_block}\n\n"
+        f"CANDIDATE PROFILE:\n{state.profile_text}"
+    )
+
+    logger.info("reviewer.prompt", extra={"chars": len(human_content)})
+
+    try:
+        structured_llm = _get_review_chain()
+        messages = [
+            SystemMessage(content=_REVIEW_SYSTEM_PROMPT),
+            HumanMessage(content=human_content),
+        ]
+        result: ReviewResult | None = await structured_llm.ainvoke(messages)
+    except Exception:  # noqa: BLE001 — node must never crash the graph
+        logger.exception("reviewer.failed")
+        # On critical API failure, cap the loop at 3 attempts even with retries.
+        return {
+            "review_comments": [],
+            "revision_number": min(state.revision_number + 1, 3),
+        }
+
+    if result is None:
+        logger.warning("reviewer.no_structured_output")
+        return {
+            "review_comments": [],
+            "revision_number": min(state.revision_number + 1, 3),
+        }
+
+    # Extract comments; deduplicate and trim blanks.
+    comments = _dedupe(result.comments) if result.comments else []
+
+    logger.info(
+        "reviewer.done",
+        extra={"is_approved": result.is_approved, "comment_count": len(comments)},
+    )
+    # Increment revision counter (the single point where loop attempts are tracked).
     return {
-        "cover_letter_draft": result.cover_letter,
+        "review_comments": comments,
         "revision_number": state.revision_number + 1,
     }
-
-
-def reviewer(state: GraphState) -> dict:
-    """Critique the drafts, producing review comments to act on."""
-    logger.info("node", extra={"node": "reviewer"})
-    return {"review_comments": []}
 
 
 def should_revise(state: GraphState) -> str:
     """Decide whether to loop back for another draft or finish.
 
     Loop back to ``draft_documents`` while there are outstanding review comments
-    and we are under the revision cap; otherwise terminate the graph.
+    (non-empty after stripping) and we are under the revision cap; otherwise
+    terminate the graph.
     """
-    if state.review_comments and state.revision_number < 3:
+    meaningful_comments = [c for c in (state.review_comments or []) if c.strip()]
+    if meaningful_comments and state.revision_number < 3:
         return "draft_documents"
     return "__end__"

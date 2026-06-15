@@ -43,8 +43,8 @@ workflow.add_conditional_edges(
     "reviewer",
     should_revise,
     {
-        "draft_documents": "draft_documents",
-        "__end__": END,
+        "draft_documents": "draft_documents",  # Key = return value from should_revise
+        "__end__": END,                         # Key = return value "__end__" -> END constant
     },
 )
 
