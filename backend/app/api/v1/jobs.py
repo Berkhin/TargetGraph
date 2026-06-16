@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import get_session
@@ -21,6 +21,7 @@ from app.services.orchestrator import (
     ProfileNotFoundError,
     PipelineExecutionError,
     run_pipeline,
+    run_pipeline_stream,
 )
 
 router = APIRouter(prefix="/api/v1/jobs", tags=["jobs"])
@@ -133,3 +134,30 @@ async def match_job(
         )
 
     return JobMatchResponse.model_validate(job)
+
+
+@router.websocket("/{job_id}/ws-match")
+async def match_job_ws(
+    websocket: WebSocket,
+    job_id: uuid.UUID,
+    profile_id: uuid.UUID = Query(...),
+) -> None:
+    """Stream the AI matching pipeline for a job/profile over a WebSocket.
+
+    Query parameters:
+        profile_id: UUID of the candidate profile to match against the job.
+
+    Accepts the connection, then delegates to
+    :func:`~app.services.orchestrator.run_pipeline_stream`, which emits one JSON
+    frame per pipeline stage (``init`` → per-node progress, with ``match_profile``
+    carrying the score and reason → a final ``done``/``error``) and closes the
+    socket. Missing job/profile, pipeline errors, and client disconnects are all
+    handled inside that function.
+
+    Unlike the REST routes, this endpoint does *not* depend on ``get_session``:
+    the streaming service owns its own short-lived sessions so no database
+    connection is pinned for the whole (long) graph run, and there is no
+    request-scoped commit to collide with the service's own.
+    """
+    await websocket.accept()
+    await run_pipeline_stream(job_id, profile_id, websocket)

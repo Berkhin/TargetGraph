@@ -1,13 +1,12 @@
-"""Tests for the SerpAPI (Google Jobs) sourcing service.
+"""Tests for the Apify (LinkedIn Jobs) sourcing service.
 
-HTTP is exercised through httpx's built-in :class:`httpx.MockTransport` (no new
-dependency, no real network), with a client injected into the service so its
-own client lifecycle is bypassed.
+Apify is exercised through a hand-rolled fake :class:`ApifyClientAsync` injected
+into the service (no real network, no real container runs), so we assert the
+run_input we send, the dataset we read back, error wrapping, and the mapper.
 """
 
 from __future__ import annotations
 
-import httpx
 import pytest
 
 from app.core.config import SourcingSettings
@@ -16,148 +15,173 @@ from app.services import sourcing
 from app.services.sourcing import (
     SourcingError,
     _to_job_create,
-    fetch_jobs_from_google,
+    fetch_jobs_from_apify,
 )
 
 
 @pytest.fixture(autouse=True)
 def _patch_settings(monkeypatch: pytest.MonkeyPatch) -> SourcingSettings:
-    """Bypass the fail-fast SERPAPI_KEY requirement with an explicit test config.
+    """Bypass the fail-fast APIFY_TOKEN requirement with an explicit test config.
 
-    The key is provided via its env alias (SERPAPI_KEY) — pydantic-settings
+    The token is provided via its env alias (APIFY_TOKEN) — pydantic-settings
     populates ``validation_alias`` fields from the environment, not from
     field-name init kwargs.
     """
-    monkeypatch.setenv("SERPAPI_KEY", "test-key")
+    monkeypatch.setenv("APIFY_TOKEN", "test-token")
     settings = SourcingSettings()
     monkeypatch.setattr(sourcing, "get_sourcing_settings", lambda: settings)
     return settings
 
 
-def _client(handler) -> httpx.AsyncClient:
-    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+# --------------------------------------------------------------------------- #
+# Fake ApifyClientAsync                                                        #
+# --------------------------------------------------------------------------- #
+class _FakeListPage:
+    def __init__(self, items: list[dict]) -> None:
+        self.items = items
 
 
-async def test_fetch_happy_path_returns_jobs_results() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.params["engine"] == "google_jobs"
-        assert request.url.params["q"] == "AI Engineer"
-        assert request.url.params["location"] == "Berlin"
-        assert request.url.params["api_key"] == "test-key"
-        return httpx.Response(200, json={"jobs_results": [{"job_id": "1"}]})
+class _FakeDatasetClient:
+    def __init__(self, items: list[dict]) -> None:
+        self._items = items
 
-    async with _client(handler) as client:
-        results = await fetch_jobs_from_google("AI Engineer", "Berlin", client=client)
-
-    assert results == [{"job_id": "1"}]
+    async def list_items(self) -> _FakeListPage:
+        return _FakeListPage(self._items)
 
 
-async def test_fetch_follows_next_page_token() -> None:
-    pages = {
-        None: {
-            "jobs_results": [{"job_id": "1"}],
-            "serpapi_pagination": {"next_page_token": "tok2"},
-        },
-        "tok2": {
-            "jobs_results": [{"job_id": "2"}],
-            "serpapi_pagination": {"next_page_token": "tok3"},
-        },
-        "tok3": {"jobs_results": [{"job_id": "3"}]},  # no further token
-    }
+class _FakeActorClient:
+    def __init__(self, run: dict | None, error: Exception | None) -> None:
+        self._run = run
+        self._error = error
+        self.run_inputs: list[dict] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        token = request.url.params.get("next_page_token")
-        return httpx.Response(200, json=pages[token])
-
-    async with _client(handler) as client:
-        results = await fetch_jobs_from_google("Eng", "NYC", client=client)
-
-    assert [j["job_id"] for j in results] == ["1", "2", "3"]
+    async def call(self, *, run_input: dict | None = None) -> dict | None:
+        self.run_inputs.append(run_input or {})
+        if self._error is not None:
+            raise self._error
+        return self._run
 
 
-async def test_fetch_stops_at_max_pages() -> None:
-    calls = 0
+class _FakeApifyClient:
+    """Minimal stand-in for ApifyClientAsync covering actor().call() + dataset()."""
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal calls
-        calls += 1
-        # Always advertise another page; max_pages must still cap us.
-        return httpx.Response(
-            200,
-            json={
-                "jobs_results": [{"job_id": str(calls)}],
-                "serpapi_pagination": {"next_page_token": f"tok{calls}"},
-            },
+    _DEFAULT_RUN = object()  # sentinel: distinguish "not given" from explicit None
+
+    def __init__(
+        self,
+        *,
+        run: dict | None = _DEFAULT_RUN,
+        items: list[dict] | None = None,
+        actor_error: Exception | None = None,
+    ) -> None:
+        self._run = (
+            {"status": "SUCCEEDED", "defaultDatasetId": "ds1"}
+            if run is self._DEFAULT_RUN
+            else run
         )
+        self._items = items or []
+        self._actor_error = actor_error
+        self.actor_calls: list[str] = []
+        self.dataset_ids: list[str] = []
+        self.actor_client = _FakeActorClient(self._run, actor_error)
 
-    async with _client(handler) as client:
-        results = await fetch_jobs_from_google("Eng", "NYC", client=client, max_pages=2)
+    def actor(self, actor_id: str) -> _FakeActorClient:
+        self.actor_calls.append(actor_id)
+        return self.actor_client
 
-    assert calls == 2
-    assert len(results) == 2
-
-
-async def test_fetch_http_500_raises_sourcing_error() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(500, json={"error": "boom"})
-
-    async with _client(handler) as client:
-        with pytest.raises(SourcingError):
-            await fetch_jobs_from_google("Eng", "NYC", client=client)
+    def dataset(self, dataset_id: str) -> _FakeDatasetClient:
+        self.dataset_ids.append(dataset_id)
+        return _FakeDatasetClient(self._items)
 
 
-async def test_fetch_timeout_raises_sourcing_error() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.TimeoutException("timed out", request=request)
+async def test_fetch_happy_path_returns_dataset_items() -> None:
+    items = [{"job_id": "1"}, {"job_id": "2"}]
+    client = _FakeApifyClient(items=items)
 
-    async with _client(handler) as client:
-        with pytest.raises(SourcingError):
-            await fetch_jobs_from_google("Eng", "NYC", client=client)
+    results = await fetch_jobs_from_apify(
+        '"AI Engineer" OR "ML Engineer"', "Berlin", client=client
+    )
+
+    assert results == items
+    # The whole profile is one actor run against the configured actor.
+    assert client.actor_calls == ["curious_coder/linkedin-jobs-scraper"]
+    assert client.dataset_ids == ["ds1"]
 
 
-async def test_fetch_connection_error_raises_sourcing_error() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("no route", request=request)
+async def test_fetch_sends_expected_run_input() -> None:
+    client = _FakeApifyClient(items=[])
 
-    async with _client(handler) as client:
-        with pytest.raises(SourcingError):
-            await fetch_jobs_from_google("Eng", "NYC", client=client)
+    await fetch_jobs_from_apify('"Eng"', "Israel", client=client)
+
+    # The actor is URL-driven: the (query, location) pair is encoded into a
+    # LinkedIn guest search URL passed as the required ``urls`` input, and the
+    # cost-bounding ``pages`` setting (default 1) is translated into ``count``.
+    assert client.actor_client.run_inputs == [
+        {
+            "urls": [
+                "https://www.linkedin.com/jobs/search/"
+                "?keywords=%22Eng%22&location=Israel"
+            ],
+            "count": 25,
+            "scrapeCompany": False,
+        }
+    ]
+
+
+async def test_fetch_actor_error_raises_sourcing_error() -> None:
+    client = _FakeApifyClient(actor_error=RuntimeError("actor exploded"))
+
+    with pytest.raises(SourcingError):
+        await fetch_jobs_from_apify('"Eng"', "NYC", client=client)
+
+
+async def test_fetch_missing_dataset_raises_sourcing_error() -> None:
+    # A run that finished without a dataset id is treated as a failure.
+    client = _FakeApifyClient(run={"status": "SUCCEEDED", "defaultDatasetId": None})
+
+    with pytest.raises(SourcingError):
+        await fetch_jobs_from_apify('"Eng"', "NYC", client=client)
+
+
+async def test_fetch_none_run_raises_sourcing_error() -> None:
+    client = _FakeApifyClient(run=None)
+
+    with pytest.raises(SourcingError):
+        await fetch_jobs_from_apify('"Eng"', "NYC", client=client)
 
 
 # --------------------------------------------------------------------------- #
 # _to_job_create mapping                                                       #
 # --------------------------------------------------------------------------- #
-def test_to_job_create_prefers_share_link() -> None:
+def test_to_job_create_maps_apify_keys() -> None:
     job = _to_job_create(
         {
             "job_id": "abc",
-            "title": "Senior Engineer",
-            "company_name": "Acme",
+            "job_title": "Senior Engineer",
+            "company": "Acme",
             "description": "Do things.",
-            "share_link": "https://g.co/share",
-            "apply_options": [{"link": "https://apply.example/1"}],
+            "job_url": "https://www.linkedin.com/jobs/view/abc",
         }
     )
     assert isinstance(job, JobCreate)
     assert job.source_job_id == "abc"
-    assert job.source_url == "https://g.co/share"
+    assert job.job_title == "Senior Engineer"
     assert job.company_name == "Acme"
+    assert job.description == "Do things."
+    assert job.source_url == "https://www.linkedin.com/jobs/view/abc"
 
 
-def test_to_job_create_falls_back_to_apply_option_then_synthetic() -> None:
-    apply_only = _to_job_create(
-        {"job_id": "x", "title": "T", "apply_options": [{"link": "https://apply/2"}]}
-    )
-    assert apply_only is not None
-    assert apply_only.source_url == "https://apply/2"
-
-    synthetic = _to_job_create({"job_id": "y", "title": "T"})
-    assert synthetic is not None
-    assert synthetic.source_url == "google_jobs://y"
+def test_to_job_create_coerces_numeric_job_id_and_falls_back_to_synthetic_url() -> None:
+    # LinkedIn job ids arrive as numbers; they must coerce to str cleanly, and a
+    # missing job_url falls back to a synthetic, dedup-stable URL.
+    job = _to_job_create({"job_id": 4055123, "job_title": "T"})
+    assert job is not None
+    assert job.source_job_id == "4055123"
+    assert job.source_url == "apify://4055123"
     # min_length=1 fields get non-empty fallbacks.
-    assert synthetic.company_name == "Unknown"
-    assert synthetic.description == "No description provided."
+    assert job.company_name == "Unknown"
+    assert job.description == "No description provided."
 
 
 def test_to_job_create_skips_result_without_job_id() -> None:
-    assert _to_job_create({"title": "No id"}) is None
+    assert _to_job_create({"job_title": "No id"}) is None

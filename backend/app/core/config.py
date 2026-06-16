@@ -22,6 +22,33 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # or via ``python -m scripts.*``. (config.py lives at backend/app/core/.)
 _ENV_FILE = Path(__file__).resolve().parents[3] / ".env"
 
+# The ``backend`` package root (config.py lives at backend/app/core/). Relative
+# SQLite file paths are anchored here so every entry point — uvicorn (launched
+# from ``backend``), Alembic (alembic.ini lives in ``backend``), and ad-hoc
+# scripts launched from anywhere — opens the *same* file. Otherwise a relative
+# ``sqlite:///./dev.db`` silently resolves against the current directory, so a
+# task run from the repo root and the API run from ``backend`` end up on two
+# different databases.
+_BACKEND_DIR = Path(__file__).resolve().parents[2]
+
+
+def _absolutize_sqlite_url(url: str) -> str:
+    """Anchor a relative SQLite file path in ``url`` to :data:`_BACKEND_DIR`.
+
+    No-ops for non-SQLite URLs, in-memory databases, and already-absolute
+    paths, so it is safe to apply to any ``DATABASE_URL``.
+    """
+    scheme, sep, path = url.partition(":///")
+    if not sep or "sqlite" not in scheme:
+        return url
+    if path.startswith(":memory:") or not path:
+        return url
+    candidate = Path(path)
+    if candidate.is_absolute():
+        return url
+    absolute = (_BACKEND_DIR / path).resolve()
+    return f"{scheme}:///{absolute.as_posix()}"
+
 
 class EmailVerificationSettings(BaseSettings):
     """Tunables for :class:`app.services.email_verification.EmailVerificationService`.
@@ -144,9 +171,14 @@ class DatabaseSettings(BaseSettings):
 
     @property
     def async_url(self) -> str:
-        """The SQLAlchemy async (asyncpg) connection URL."""
+        """The SQLAlchemy async connection URL.
+
+        A relative SQLite path is rewritten to an absolute one anchored at the
+        ``backend`` directory so the database file is identical regardless of the
+        process's working directory (see :func:`_absolutize_sqlite_url`).
+        """
         if self.database_url:
-            return self.database_url
+            return _absolutize_sqlite_url(self.database_url)
         user = quote_plus(self.postgres_user)
         password = quote_plus(self.postgres_password)
         return (
@@ -217,70 +249,97 @@ def get_ai_settings() -> AISettings:
 
 
 class SourcingSettings(BaseSettings):
-    """Settings for the autonomous job-sourcing layer (Google Jobs via SerpAPI).
+    """Settings for the autonomous job-sourcing layer (LinkedIn Jobs via Apify).
 
-    Drives :func:`app.services.sourcing.fetch_jobs_from_google` and the periodic
-    :func:`app.tasks.sourcing_task.run_sourcing_job` task. The ``SERPAPI_KEY`` is
+    Drives :func:`app.services.sourcing.fetch_jobs_from_apify` and the periodic
+    :func:`app.tasks.sourcing_task.run_sourcing_job` task. The ``APIFY_TOKEN`` is
     required and validated at load time so the application fails fast at start-up
     rather than silently no-op'ing every scheduled run (mirrors :class:`AISettings`).
+
+    Cost model (this drives the whole design): every actor run spins up an Apify
+    container, which is what we are billed for — *not* the number of result rows.
+    So the task makes at most ONE actor run per profile (all target titles are
+    OR-joined into a single Boolean query) and ``max_runs_per_task`` plus
+    ``pages`` keep a single tick comfortably inside the free $5/month tier.
     """
 
     model_config = SettingsConfigDict(
         env_file=_ENV_FILE, env_file_encoding="utf-8", extra="ignore"
     )
 
-    serpapi_key: str = Field(
+    apify_token: str = Field(
         default="",
-        validation_alias="SERPAPI_KEY",
-        description="SerpAPI API key used for the Google Jobs engine.",
+        validation_alias="APIFY_TOKEN",
+        description="Apify API token used by ApifyClientAsync.",
     )
-    serpapi_base_url: str = Field(
-        default="https://serpapi.com/search.json",
-        validation_alias="SERPAPI_BASE_URL",
-        description="SerpAPI search endpoint.",
-    )
-    request_timeout_seconds: float = Field(
-        default=20.0,
-        gt=0,
-        validation_alias="SOURCING_REQUEST_TIMEOUT_SECONDS",
-        description="Per-request timeout for SerpAPI HTTP calls.",
+    apify_actor_id: str = Field(
+        default="curious_coder/linkedin-jobs-scraper",
+        validation_alias="APIFY_ACTOR_ID",
+        description="Apify actor that scrapes LinkedIn Jobs.",
     )
     default_location: str = Field(
-        default="United States",
+        default="Israel",
         validation_alias="SOURCING_LOCATION",
         description="Fallback search location when a profile has none set.",
     )
+    force_default_location: bool = Field(
+        default=True,
+        validation_alias="SOURCING_FORCE_DEFAULT_LOCATION",
+        description=(
+            "When true, every run uses default_location and the profile's own "
+            "preferred location is ignored. Some regions return little or nothing "
+            "on LinkedIn, so we source from a location with dense coverage "
+            "(default 'Israel', which includes remote-friendly roles). "
+            "Set false to honour each profile's preferred location instead."
+        ),
+    )
     interval_hours: int = Field(
-        default=6,
+        default=24,
         ge=1,
         validation_alias="SOURCING_INTERVAL_HOURS",
-        description="How often the sourcing job runs, in hours.",
-    )
-    pages_per_query: int = Field(
-        default=3,
-        ge=1,
-        le=20,
-        validation_alias="SOURCING_PAGES_PER_QUERY",
         description=(
-            "Max SerpAPI result pages to follow per query via next_page_token "
-            "(~10 jobs/page). Google deprecated the 'start' offset; pagination "
-            "is token-based."
+            "How often the sourcing job runs, in hours. Drives monthly Apify "
+            "spend together with pages and max_runs_per_task — see the budget "
+            "note on max_runs_per_task."
+        ),
+    )
+    pages: int = Field(
+        default=1,
+        ge=1,
+        le=10,
+        validation_alias="SOURCING_PAGES",
+        description=(
+            "Result pages the Apify actor scrapes per run (the actor's 'pages' "
+            "input). Kept at 1 to minimise per-run compute and stay inside the "
+            "free $5/month tier; raise only if you have budget headroom."
+        ),
+    )
+    max_runs_per_task: int = Field(
+        default=1,
+        ge=1,
+        validation_alias="SOURCING_MAX_RUNS_PER_TASK",
+        description=(
+            "Hard ceiling on Apify actor runs started in a single task tick "
+            "(one run per profile). Each run bills a container, so this bounds "
+            "monthly spend deterministically: monthly runs <= "
+            "(730 / interval_hours) * max_runs_per_task. With the defaults "
+            "(24h, 1) that is ~30 runs/month. Keep the product under your tier."
         ),
     )
 
     @model_validator(mode="after")
     def _require_api_key(self) -> "SourcingSettings":
-        """Fail fast on a missing key.
+        """Fail fast on a missing token.
 
-        Without a key every SerpAPI call returns an error, so a scheduled run
+        Without a token every Apify call returns an error, so a scheduled run
         would loop, log failures, and add nothing. We surface the
         misconfiguration at settings-load (start-up) time instead. Unit tests
-        that don't need a real key should construct ``SourcingSettings(
-        serpapi_key="test-key")`` directly rather than via ``get_sourcing_settings``.
+        that don't need a real token should construct ``SourcingSettings(
+        apify_token="test-token")`` directly rather than via ``get_sourcing_settings``.
         """
-        if not self.serpapi_key.strip():
+        if not self.apify_token.strip():
             raise ValueError(
-                "SERPAPI_KEY is required but not set. Add it to your .env file."
+                "APIFY_TOKEN is required but not set. Add it to your .env file."
             )
         return self
 
@@ -289,3 +348,35 @@ class SourcingSettings(BaseSettings):
 def get_sourcing_settings() -> SourcingSettings:
     """Return a process-wide cached sourcing settings instance."""
     return SourcingSettings()
+
+
+class CORSSettings(BaseSettings):
+    """Cross-Origin Resource Sharing policy for the browser SPA frontend.
+
+    The Vite dev server runs on a different origin (``http://localhost:5173``)
+    than the API (``http://localhost:8000``), so the browser blocks calls unless
+    the API echoes the appropriate ``Access-Control-Allow-*`` headers. Origins
+    are configurable via a comma-separated ``CORS_ALLOW_ORIGINS`` for staging /
+    production deployments.
+    """
+
+    model_config = SettingsConfigDict(
+        env_file=_ENV_FILE, env_file_encoding="utf-8", extra="ignore"
+    )
+
+    allow_origins_raw: str = Field(
+        default="http://localhost:5173,http://127.0.0.1:5173",
+        validation_alias="CORS_ALLOW_ORIGINS",
+        description="Comma-separated list of allowed browser origins.",
+    )
+
+    @property
+    def allow_origins(self) -> list[str]:
+        """Parsed, de-blanked list of allowed origins."""
+        return [o.strip() for o in self.allow_origins_raw.split(",") if o.strip()]
+
+
+@lru_cache
+def get_cors_settings() -> CORSSettings:
+    """Return a process-wide cached CORS settings instance."""
+    return CORSSettings()

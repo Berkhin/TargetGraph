@@ -65,6 +65,30 @@ class ProfileRepository(BaseRepository):
         entities = (await self._session.scalars(stmt)).all()
         return [ProfileRead.model_validate(entity) for entity in entities]
 
+    async def get_first_profile(self) -> ProfileRead | None:
+        """Return a single profile deterministically, or ``None`` if there are
+        none.
+
+        Used by the ``/profiles/active`` endpoint for the single-candidate case.
+        ``MasterProfile`` has no creation timestamp, so there is no meaningful
+        "newest"/"oldest"; we order by ``id`` purely to make the choice *stable*
+        across calls (rather than relying on unspecified DB row order). When an
+        explicit ``is_active`` flag is introduced this should select on that.
+        Loads children via ``selectinload`` like the other reads, and ``LIMIT 1``
+        avoids fetching every profile just to pick one.
+        """
+        stmt = (
+            select(MasterProfile)
+            .options(
+                selectinload(MasterProfile.experiences),
+                selectinload(MasterProfile.skills),
+            )
+            .order_by(MasterProfile.id)
+            .limit(1)
+        )
+        entity = (await self._session.scalars(stmt)).first()
+        return ProfileRead.model_validate(entity) if entity is not None else None
+
     async def get_full_profile(self, profile_id: uuid.UUID) -> ProfileRead | None:
         """Return the profile with all experiences and skills eagerly loaded.
 

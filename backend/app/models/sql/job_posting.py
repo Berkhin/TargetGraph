@@ -30,6 +30,13 @@ class JobPosting(Base):
     description: Mapped[str] = mapped_column(Text)
     source_url: Mapped[str] = mapped_column(String(2048))
 
+    # Rich metadata from the curious_coder/linkedin-jobs-scraper actor. All
+    # nullable so existing rows and sparse/manually-created postings stay valid.
+    location: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    employment_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    seniority_level: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    salary: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
     # Stable, opaque provider id (e.g. SerpAPI's google_jobs ``job_id``) used to
     # deduplicate sourced postings. Nullable so manually-created rows (API / test
     # script) remain valid; unique + indexed so dedup lookups are cheap and a
