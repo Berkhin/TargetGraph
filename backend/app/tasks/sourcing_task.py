@@ -3,8 +3,12 @@
 This is the seam between the (DB-agnostic) Apify service and persistence. Each
 run reads every master profile's target titles + preferred location, runs the
 LinkedIn Jobs Apify actor *once per profile*, and persists postings that aren't
-already known (deduped by ``source_job_id``) with status ``NEW`` for the AI
-matching pipeline to pick up later.
+already known (deduped by ``source_job_id``). Each new posting is pre-screened by
+a cheap LLM relevance check: postings scoring at/above ``_PRESCREEN_THRESHOLD``
+land as ``NEW`` for the matching pipeline to pick up; the rest land as
+``FILTERED_OUT`` so the board hides them and the pipeline never scores them. The
+pre-screen runs only for non-duplicate postings, so known jobs are never
+re-scored.
 
 Cost optimisation (the whole point of the Apify migration):
 
@@ -35,14 +39,22 @@ from typing import Any
 from apify_client import ApifyClientAsync
 from sqlalchemy.exc import IntegrityError
 
+from app.ai.nodes import evaluate_job_relevance
 from app.core.config import get_sourcing_settings
 from app.core.logging import get_logger
 from app.db.database import AsyncSessionLocal
+from app.models.enums import JobStatus
 from app.repositories.job_repository import JobRepository
 from app.repositories.profile_repository import ProfileRepository
 from app.services.sourcing import SourcingError, _to_job_create, fetch_jobs_from_apify
+from app.utils.formatters import format_profile_to_markdown
 
 logger = get_logger(__name__)
+
+# Minimum pre-screen score (0-100) for a sourced posting to reach the board as
+# ``NEW``. Below this it is stored ``FILTERED_OUT`` so the UI hides it and the
+# matching pipeline never spends LLM calls on it.
+_PRESCREEN_THRESHOLD = 80
 
 
 def _resolve_location(
@@ -88,6 +100,7 @@ async def run_sourcing_job(session_factory: Any = AsyncSessionLocal) -> None:
 
     added = 0
     skipped = 0
+    filtered_out = 0
     query_errors = 0
     profiles_processed = 0
     # Apify actor runs started this tick (each run == one billed container). The
@@ -141,8 +154,13 @@ async def run_sourcing_job(session_factory: Any = AsyncSessionLocal) -> None:
 
                 runs_made += 1
 
+                # Render the candidate's Master Profile once per profile — the
+                # pre-screen reuses it for every fetched posting.
+                profile_text = format_profile_to_markdown(profile)
+
                 profile_added = 0
                 profile_skipped = 0
+                profile_filtered = 0
                 for raw in raw_results:
                     job_create = _to_job_create(raw)
                     if job_create is None or job_create.source_job_id is None:
@@ -155,10 +173,35 @@ async def run_sourcing_job(session_factory: Any = AsyncSessionLocal) -> None:
                         profile_skipped += 1
                         continue
 
+                    # Cheap pre-screen, run ONLY for genuinely new postings (after
+                    # the dedup check above) so we never re-score known jobs. A
+                    # score below the threshold is persisted FILTERED_OUT — hidden
+                    # from the board and never re-scraped — instead of NEW.
+                    relevance = await evaluate_job_relevance(
+                        job_create.description, profile_text
+                    )
+                    score = relevance["score"]
+                    if score is not None and score < _PRESCREEN_THRESHOLD:
+                        status = JobStatus.FILTERED_OUT
+                    else:
+                        # score >= threshold, or None (pre-screen unavailable):
+                        # fail open and let the full pipeline decide later.
+                        status = JobStatus.NEW
+                    job_create = job_create.model_copy(
+                        update={
+                            "status": status,
+                            "match_score": score,
+                            "match_reason": relevance["reason"],
+                        }
+                    )
+
                     try:
                         async with session.begin_nested():
                             await job_repo.create(job_create)
-                        profile_added += 1
+                        if status is JobStatus.FILTERED_OUT:
+                            profile_filtered += 1
+                        else:
+                            profile_added += 1
                     except IntegrityError:
                         # A concurrent run inserted the same source_job_id between
                         # our check and insert; the SAVEPOINT rolled back, so only
@@ -171,6 +214,7 @@ async def run_sourcing_job(session_factory: Any = AsyncSessionLocal) -> None:
 
                 added += profile_added
                 skipped += profile_skipped
+                filtered_out += profile_filtered
                 logger.info(
                     "sourcing_profile_done",
                     extra={
@@ -179,6 +223,7 @@ async def run_sourcing_job(session_factory: Any = AsyncSessionLocal) -> None:
                         "fetched": len(raw_results),
                         "added": profile_added,
                         "skipped": profile_skipped,
+                        "filtered_out": profile_filtered,
                     },
                 )
 
@@ -187,6 +232,7 @@ async def run_sourcing_job(session_factory: Any = AsyncSessionLocal) -> None:
                 extra={
                     "new_added": added,
                     "duplicates_skipped": skipped,
+                    "filtered_out": filtered_out,
                     "query_errors": query_errors,
                     "profiles": profiles_processed,
                     "apify_runs": runs_made,
@@ -201,6 +247,7 @@ async def run_sourcing_job(session_factory: Any = AsyncSessionLocal) -> None:
             extra={
                 "new_added": added,
                 "duplicates_skipped": skipped,
+                "filtered_out": filtered_out,
                 "query_errors": query_errors,
                 "profiles": profiles_processed,
                 "apify_runs": runs_made,

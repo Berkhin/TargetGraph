@@ -55,12 +55,30 @@ class GeneratedDocuments(BaseModel):
     )
 
 
+class TailoredCV(BaseModel):
+    """Structured output target for the ``generate_tailored_cv`` node.
+
+    Bound to the model via ``with_structured_output`` so Gemini returns the
+    tailored résumé as a single Markdown field rather than free-form prose.
+    """
+
+    tailored_cv: str = Field(
+        description="ATS-optimised résumé in Markdown, rewritten to resonate with "
+        "the job's keywords without inventing experience.",
+    )
+
+
 class GraphState(BaseModel):
     """End-to-end state for the job/profile matching workflow."""
 
     # --- Inputs (populated before the graph runs) ---
     job_text: str
     profile_text: str
+    # Minimum match score to keep drafting. Below this the graph short-circuits
+    # right after ``match_profile`` — no cover letter / CV is generated for a job
+    # that will be rejected anyway, saving the LLM calls (and quota). Defaults to
+    # the service's MATCHED threshold; the orchestrator injects the real value.
+    score_threshold: int = 70
 
     # --- Intermediate / output fields (filled in by the nodes) ---
     extracted_requirements: ExtractedRequirements = Field(
@@ -73,7 +91,10 @@ class GraphState(BaseModel):
     matching_skills: list[str] = Field(default_factory=list)
     missing_skills: list[str] = Field(default_factory=list)
     match_reasoning: str = ""
-    resume_draft: str | None = None
     cover_letter_draft: str | None = None
+    # ATS-optimised résumé produced by ``generate_tailored_cv`` in parallel with
+    # the cover letter. Disjoint from ``cover_letter_draft`` so both nodes can
+    # write the state concurrently without a reducer.
+    tailored_cv: str | None = None
     review_comments: list[str] = Field(default_factory=list)
     revision_number: int = 0

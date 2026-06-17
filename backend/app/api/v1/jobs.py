@@ -12,6 +12,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.logging import get_logger
 from app.db.database import get_session
 from app.models.enums import JobStatus
 from app.models.schemas.job import JobCreate, JobMatchResponse, JobRead, JobUpdate
@@ -23,6 +24,8 @@ from app.services.orchestrator import (
     run_pipeline,
     run_pipeline_stream,
 )
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/api/v1/jobs", tags=["jobs"])
 
@@ -118,12 +121,15 @@ async def match_job(
     # Save results at the end, after all checks pass
     match_score = pipeline_result.get("match_score", 0)
     cover_letter = pipeline_result.get("cover_letter_draft", "")
+    tailored_cv = pipeline_result.get("tailored_cv")
     result_status = (
         JobStatus.MATCHED if match_score >= 70 else JobStatus.REJECTED_BY_AI
     )
 
     repo = JobRepository(session)
-    await repo.save_match_results(job_id, match_score, cover_letter, result_status)
+    await repo.save_match_results(
+        job_id, match_score, cover_letter, result_status, tailored_cv
+    )
 
     # Fetch the updated job and return it
     job = await repo.get_by_id(job_id)
@@ -160,4 +166,13 @@ async def match_job_ws(
     request-scoped commit to collide with the service's own.
     """
     await websocket.accept()
-    await run_pipeline_stream(job_id, profile_id, websocket)
+    # run_pipeline_stream already handles disconnects, pipeline errors, and
+    # persistence failures internally, but guard the endpoint as a last resort so
+    # no unexpected error can ever escape into the ASGI server.
+    try:
+        await run_pipeline_stream(job_id, profile_id, websocket)
+    except Exception:  # noqa: BLE001 — endpoint must never crash the server
+        logger.exception(
+            "match_job_ws_failed",
+            extra={"job_id": str(job_id), "profile_id": str(profile_id)},
+        )

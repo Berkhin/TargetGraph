@@ -1,3 +1,4 @@
+import { ExternalLink, FileText } from "lucide-react";
 import {
   Card,
   CardAction,
@@ -9,8 +10,17 @@ import {
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 import type { JobRead, JobStatus } from "@/features/jobs-board/api/types";
-import { useMatchJob } from "@/features/jobs-board/hooks/useMatchJob";
+import { useMatchJobStream } from "@/features/jobs-board/hooks/useMatchJobStream";
 
 // Visual treatment per lifecycle status (see JobStatus in contracts/job.ts).
 const STATUS_VARIANT: Record<
@@ -20,12 +30,14 @@ const STATUS_VARIANT: Record<
   NEW: "default",
   MATCHED: "secondary",
   REJECTED_BY_AI: "destructive",
+  FILTERED_OUT: "outline",
 };
 
 const STATUS_LABEL: Record<JobStatus, string> = {
   NEW: "NEW",
   MATCHED: "MATCHED",
   REJECTED_BY_AI: "REJECTED",
+  FILTERED_OUT: "FILTERED",
 };
 
 export type JobCardProps = {
@@ -39,50 +51,131 @@ export type JobCardProps = {
 };
 
 export function JobCard({ job, profileId, location }: JobCardProps) {
-  const matchJob = useMatchJob();
+  const { phase, isGenerating, streamLogs, startGeneration } =
+    useMatchJobStream();
 
   const displayLocation = location ?? job.location;
+
+  // Terminal stays visible during the run and after it finishes (done/error),
+  // so the log remains readable; only "idle" shows the metadata badges.
+  const showTerminal = phase !== "idle";
+
+  const buttonLabel = isGenerating
+    ? "Генерация..."
+    : phase === "done"
+      ? "Сгенерировать заново"
+      : phase === "error"
+        ? "Повторить"
+        : "Сгенерировать отклик";
 
   return (
     <Card className="w-full max-w-md">
       <CardHeader>
         <CardTitle>{job.job_title}</CardTitle>
         <CardDescription>{job.company_name}</CardDescription>
-        <CardAction>
+        <CardAction className="flex items-center gap-1">
+          {/* Description popup: the full posting text is long, so it lives in a
+              modal instead of cluttering the card. */}
+          <Dialog>
+            <DialogTrigger asChild>
+              <Button variant="ghost" size="icon" aria-label="Описание вакансии">
+                <FileText />
+              </Button>
+            </DialogTrigger>
+            <DialogContent className="max-h-[80vh] overflow-hidden">
+              <DialogHeader>
+                <DialogTitle>{job.job_title}</DialogTitle>
+                <DialogDescription>{job.company_name}</DialogDescription>
+              </DialogHeader>
+              <div className="max-h-[55vh] overflow-y-auto pr-2 text-sm whitespace-pre-wrap">
+                {job.description}
+              </div>
+              <DialogFooter>
+                <Button asChild variant="outline">
+                  <a
+                    href={job.source_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    <ExternalLink /> Открыть вакансию
+                  </a>
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+
+          {/* Direct link to the original posting, always one click away. */}
+          <Button
+            asChild
+            variant="ghost"
+            size="icon"
+            aria-label="Открыть вакансию"
+          >
+            <a href={job.source_url} target="_blank" rel="noopener noreferrer">
+              <ExternalLink />
+            </a>
+          </Button>
+
           <Badge variant={STATUS_VARIANT[job.status]}>
             {STATUS_LABEL[job.status]}
           </Badge>
         </CardAction>
       </CardHeader>
 
-      <CardContent className="flex flex-wrap gap-2">
-        {displayLocation ? (
-          <Badge variant="outline">{displayLocation}</Badge>
-        ) : null}
-        {job.employment_type ? (
-          <Badge variant="outline">{job.employment_type}</Badge>
-        ) : null}
-        {job.seniority_level ? (
-          <Badge variant="outline">{job.seniority_level}</Badge>
-        ) : null}
-        {job.salary ? (
-          <Badge variant="outline">{job.salary}</Badge>
-        ) : null}
-        {job.match_score !== null ? (
-          <Badge variant="secondary">Match {job.match_score}%</Badge>
-        ) : null}
+      <CardContent>
+        {showTerminal ? (
+          // Live AI pipeline "terminal": replaces the metadata while streaming
+          // and remains after completion so the log stays readable.
+          <div className="h-40 overflow-y-auto rounded-md bg-zinc-900 p-3 font-mono text-xs leading-relaxed text-zinc-100">
+            {streamLogs.length === 0 ? (
+              <p className="text-zinc-400">Подключение...</p>
+            ) : (
+              streamLogs.map((line, i) => {
+                const isLast = i === streamLogs.length - 1;
+                const doneColor =
+                  isLast && phase === "done"
+                    ? "text-emerald-400"
+                    : isLast && phase === "error"
+                      ? "text-red-400"
+                      : "";
+                return (
+                  <p key={i} className={doneColor}>
+                    <span className="text-emerald-400">$</span> {line}
+                  </p>
+                );
+              })
+            )}
+          </div>
+        ) : (
+          <div className="flex flex-wrap gap-2">
+            {displayLocation ? (
+              <Badge variant="outline">{displayLocation}</Badge>
+            ) : null}
+            {job.employment_type ? (
+              <Badge variant="outline">{job.employment_type}</Badge>
+            ) : null}
+            {job.seniority_level ? (
+              <Badge variant="outline">{job.seniority_level}</Badge>
+            ) : null}
+            {job.salary ? (
+              <Badge variant="outline">{job.salary}</Badge>
+            ) : null}
+            {job.match_score !== null ? (
+              <Badge variant="secondary">Match {job.match_score}%</Badge>
+            ) : null}
+          </div>
+        )}
       </CardContent>
 
       <CardFooter>
         <Button
           className="w-full"
-          disabled={matchJob.isPending || profileId === null}
+          disabled={isGenerating || profileId === null}
           onClick={() =>
-            profileId !== null &&
-            matchJob.mutate({ jobId: job.id, profileId })
+            profileId !== null && startGeneration(job.id, profileId)
           }
         >
-          {matchJob.isPending ? "Генерация..." : "Сгенерировать отклик"}
+          {buttonLabel}
         </Button>
       </CardFooter>
     </Card>

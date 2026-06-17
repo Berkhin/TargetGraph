@@ -26,3 +26,17 @@ export type ProfileRead = {
   experiences: ExperienceRead[];
   skills: SkillRead[];
 };
+
+// Child write shapes — like the *Read types but without the server-generated id.
+export type ExperienceWrite = Omit<ExperienceRead, "id">;
+export type SkillWrite = Omit<SkillRead, "id">;
+
+// PUT /api/v1/profiles/{id} — mirrors backend ProfileUpdate. A full-aggregate
+// replace: nested experiences/skills are written wholesale (no child ids).
+export type ProfileUpdate = {
+  candidate_name: string;
+  target_titles: string[];
+  preferences: Record<string, unknown>;
+  experiences: ExperienceWrite[];
+  skills: SkillWrite[];
+};

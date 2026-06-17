@@ -45,7 +45,13 @@ _DEFAULT_SCORE_THRESHOLD = 70
 # calls, structured-output chains, …); filtering on these names narrows the
 # stream down to the four pipeline-node boundaries we actually want to report.
 _PIPELINE_NODES = frozenset(
-    {"extract_requirements", "match_profile", "draft_documents", "reviewer"}
+    {
+        "extract_requirements",
+        "match_profile",
+        "generate_cover_letter",
+        "generate_tailored_cv",
+        "reviewer",
+    }
 )
 
 
@@ -123,6 +129,9 @@ async def run_pipeline(
     initial_state: dict[str, Any] = {
         "job_text": job_text,
         "profile_text": profile_text,
+        # Gate drafting on the same threshold used for MATCHED/REJECTED, so a
+        # sub-threshold job is rejected without spending drafting LLM calls.
+        "score_threshold": score_threshold,
     }
 
     logger.info(
@@ -159,13 +168,14 @@ async def run_pipeline(
     if save_results:
         match_score = result.get("match_score", 0)
         cover_letter = result.get("cover_letter_draft", "")
+        tailored_cv = result.get("tailored_cv")
         status = (
             JobStatus.MATCHED
             if match_score >= score_threshold
             else JobStatus.REJECTED_BY_AI
         )
         await job_repo.save_match_results(
-            job_id, match_score, cover_letter, status
+            job_id, match_score, cover_letter, status, tailored_cv
         )
         logger.info(
             "pipeline_results_saved",
@@ -214,15 +224,26 @@ async def _watch_disconnect(websocket: WebSocket) -> None:
     ``WebSocket.receive()`` is the *only* call Starlette routes the ASGI
     ``websocket.disconnect`` message through. A handler that merely streams
     (``send`` only, never ``receive``) cannot observe a closed tab: the disconnect
-    surfaces lazily — and with a server-dependent exception type — on a later
-    ``send``. Running this concurrently with the graph lets the main loop notice a
-    gone client at the next node boundary, stop wasting LLM calls, and skip
-    persisting a result nobody is waiting for.
+    surfaces lazily on a later ``receive``. Running this concurrently with the
+    graph lets the main loop notice a gone client at the next node boundary, stop
+    wasting LLM calls, and skip persisting a result nobody is waiting for.
+
+    Crucially, the low-level ``receive()`` does NOT raise on disconnect — it
+    *returns* the ``{"type": "websocket.disconnect"}`` message and flips the
+    socket to DISCONNECTED; a *second* ``receive()`` then raises ``RuntimeError``.
+    So the disconnect must be detected on the message itself and the loop must
+    stop there, never spinning into that ``RuntimeError``. Any other receive
+    error after the peer is gone is likewise treated as "client gone" rather than
+    leaked out, so the watcher task always finishes cleanly.
     """
     try:
         while True:
-            await websocket.receive()
+            message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                return
     except WebSocketDisconnect:
+        return
+    except Exception:  # noqa: BLE001 — a broken receive == client is gone
         return
 
 
@@ -281,6 +302,9 @@ async def run_pipeline_stream(
     initial_state: dict[str, Any] = {
         "job_text": _build_job_text(job.job_title, job.company_name, job.description),
         "profile_text": format_profile_to_markdown(profile),
+        # Gate drafting on the same threshold used for MATCHED/REJECTED, so a
+        # sub-threshold job is rejected without spending drafting LLM calls.
+        "score_threshold": score_threshold,
     }
     await _safe_send(websocket, {"step": "init", "message": "Данные загружены"})
     logger.info(
@@ -344,12 +368,18 @@ async def run_pipeline_stream(
         return
     finally:
         watcher.cancel()
-        with suppress(asyncio.CancelledError):
+        # Awaiting the watcher must never let anything escape run_pipeline_stream
+        # (and from there the un-guarded ASGI endpoint). Two cases to swallow:
+        #   * the healthy path cancels the watcher -> CancelledError (a
+        #     BaseException, so NOT covered by ``Exception``);
+        #   * any server-specific error from a broken receive.
+        with suppress(asyncio.CancelledError, Exception):
             await watcher
 
     # --- 3) Short write session: its own atomic unit of work ----------------
     match_score = final_state.get("match_score") or 0
     cover_letter = final_state.get("cover_letter_draft") or ""
+    tailored_cv = final_state.get("tailored_cv")
     result_status = (
         JobStatus.MATCHED
         if match_score >= score_threshold
@@ -358,7 +388,7 @@ async def run_pipeline_stream(
     try:
         async with session_factory() as session:
             await JobRepository(session).save_match_results(
-                job_id, match_score, cover_letter, result_status
+                job_id, match_score, cover_letter, result_status, tailored_cv
             )
             await session.commit()
     except Exception:  # noqa: BLE001 — surface to the client, never crash the server
@@ -390,6 +420,7 @@ async def run_pipeline_stream(
             "score": match_score,
             "reason": final_state.get("match_reasoning", ""),
             "cover_letter_draft": cover_letter or None,
+            "tailored_cv_draft": tailored_cv or None,
         },
     )
     await _safe_close(websocket)

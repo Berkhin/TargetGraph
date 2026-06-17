@@ -14,7 +14,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
-from app.models.schemas.profile import ProfileCreate, ProfileRead
+from app.models.schemas.profile import ProfileCreate, ProfileRead, ProfileUpdate
 from app.models.sql.profile import MasterProfile, ProfileExperience, ProfileSkill
 from app.repositories.base import BaseRepository
 
@@ -49,6 +49,44 @@ class ProfileRepository(BaseRepository):
                 "this is a bug."
             )
         return profile
+
+    async def update_full_profile(
+        self, profile_id: uuid.UUID, data: ProfileUpdate
+    ) -> ProfileRead | None:
+        """Replace an existing profile and its children in place.
+
+        Full-aggregate update: scalar fields are overwritten and the nested
+        ``experiences`` / ``skills`` collections are *replaced* wholesale.
+        Reassigning the relationships relies on the ``all, delete-orphan``
+        cascade (see ``app/models/sql/profile.py``): the previously-loaded child
+        rows become orphans and are deleted, while the new ones are inserted on
+        ``flush``. Returns ``None`` if no profile exists for ``profile_id``.
+
+        Like the rest of this repository, it ``flush``-es but never ``commit``-s:
+        the surrounding unit of work owns the transaction boundary.
+        """
+        stmt = (
+            select(MasterProfile)
+            .where(MasterProfile.id == profile_id)
+            .options(
+                selectinload(MasterProfile.experiences),
+                selectinload(MasterProfile.skills),
+            )
+        )
+        entity = (await self._session.scalars(stmt)).first()
+        if entity is None:
+            return None
+
+        entity.candidate_name = data.candidate_name
+        entity.target_titles = data.target_titles
+        entity.preferences = data.preferences
+        entity.experiences = [
+            ProfileExperience(**exp.model_dump()) for exp in data.experiences
+        ]
+        entity.skills = [ProfileSkill(**skill.model_dump()) for skill in data.skills]
+        await self._session.flush()
+
+        return await self.get_full_profile(entity.id)
 
     async def get_all_profiles(self) -> list[ProfileRead]:
         """Return every master profile with its children eagerly loaded.

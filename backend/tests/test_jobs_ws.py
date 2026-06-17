@@ -19,7 +19,6 @@ from typing import Any
 
 import pytest
 import pytest_asyncio
-from fastapi import WebSocketDisconnect
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -44,8 +43,11 @@ from app.services.orchestrator import run_pipeline_stream
 class _FakeWebSocket:
     """Records sent frames and models a broken connection two ways.
 
-    * ``disconnect=True`` makes ``receive()`` raise ``WebSocketDisconnect`` — how
-      Starlette actually surfaces a closed tab (only via ``receive``).
+    * ``disconnect=True`` makes ``receive()`` mirror Starlette's *real* behaviour:
+      the first call RETURNS ``{"type": "websocket.disconnect"}`` (it does NOT
+      raise), and a *second* call raises ``RuntimeError`` — exactly the trap the
+      disconnect watcher has to survive. (The old fake raised
+      ``WebSocketDisconnect`` on the first call, which hid the bug entirely.)
     * ``send_error`` makes ``send_json`` raise the given exception — how a dead
       socket surfaces on a ``send``-only path, with a server-dependent type that
       is often *not* ``WebSocketDisconnect``.
@@ -57,6 +59,7 @@ class _FakeWebSocket:
         self.sent: list[dict[str, Any]] = []
         self.closed = False
         self._disconnect = disconnect
+        self._disconnected = False
         self._send_error = send_error
 
     async def send_json(self, data: dict[str, Any]) -> None:
@@ -66,7 +69,14 @@ class _FakeWebSocket:
 
     async def receive(self) -> dict[str, Any]:
         if self._disconnect:
-            raise WebSocketDisconnect()
+            # Mirror Starlette: first receive returns the disconnect message and
+            # flips the socket to DISCONNECTED; a second receive raises.
+            if self._disconnected:
+                raise RuntimeError(
+                    'Cannot call "receive" once a disconnect message has been received.'
+                )
+            self._disconnected = True
+            return {"type": "websocket.disconnect", "code": 1001}
         await asyncio.sleep(3600)  # healthy client: block until the watcher is cancelled
         return {}  # pragma: no cover
 
@@ -99,14 +109,22 @@ def _node_end(name: str, output: dict[str, Any]) -> dict[str, Any]:
 
 
 def _graph_events(
-    score: int, reason: str = "Strong fit", cover: str = "Dear hiring team,"
+    score: int,
+    reason: str = "Strong fit",
+    cover: str = "Dear hiring team,",
+    cv: str = "# Ada Lovelace\n- Built async APIs",
 ) -> list[dict[str, Any]]:
-    """A full happy-path event stream for one match run."""
+    """A full happy-path event stream for one match run.
+
+    Mirrors the parallel fan-out: both ``generate_cover_letter`` and
+    ``generate_tailored_cv`` emit ``on_chain_end`` before ``reviewer``.
+    """
     return [
         {"event": "on_chain_start", "name": "LangGraph", "data": {}},
         _node_end("extract_requirements", {"extracted_requirements": "..."}),
         _node_end("match_profile", {"match_score": score, "match_reasoning": reason}),
-        _node_end("draft_documents", {"cover_letter_draft": cover}),
+        _node_end("generate_cover_letter", {"cover_letter_draft": cover}),
+        _node_end("generate_tailored_cv", {"tailored_cv": cv}),
         _node_end("reviewer", {"review_comments": []}),
         # Root graph end — name is NOT a pipeline node, so it must be ignored.
         _node_end("LangGraph", {"match_score": score}),
@@ -189,12 +207,14 @@ async def test_high_score_streams_and_persists_match(factory, patch_graph) -> No
     assert done["status"] == JobStatus.MATCHED.value
     assert done["score"] == 85
     assert done["cover_letter_draft"] == "Dear hiring team,"
+    assert done["tailored_cv_draft"] == "# Ada Lovelace\n- Built async APIs"
 
     saved = await _get_job(factory, job_id)
     assert saved is not None
     assert saved.status is JobStatus.MATCHED
     assert saved.match_score == 85
     assert saved.cover_letter_draft == "Dear hiring team,"
+    assert saved.tailored_cv_draft == "# Ada Lovelace\n- Built async APIs"
 
 
 async def test_low_score_sends_rejection_reason(factory, patch_graph) -> None:
@@ -242,12 +262,15 @@ async def test_missing_profile_sends_error(factory, patch_graph) -> None:
 
 
 async def test_client_disconnect_detected_via_receive(factory, patch_graph) -> None:
-    # The realistic disconnect: the watcher's receive() raises WebSocketDisconnect
-    # mid-graph. Nothing must be persisted and the call must not raise.
+    # The realistic disconnect: the watcher's receive() RETURNS a disconnect
+    # message (and a second receive would raise RuntimeError). Nothing must be
+    # persisted and — critically — run_pipeline_stream must NOT let the watcher's
+    # RuntimeError leak out of its finally.
     job_id, profile_id = await _seed(factory)
     patch_graph(_graph_events(score=95))
     ws = _FakeWebSocket(disconnect=True)
 
+    # Must complete without raising (regression guard for the leaking finally).
     await run_pipeline_stream(job_id, profile_id, ws, session_factory=factory)
 
     saved = await _get_job(factory, job_id)
