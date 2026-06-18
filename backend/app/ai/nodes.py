@@ -18,34 +18,67 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from app.ai.llm import get_llm
-from app.ai.state import GraphState
+from app.ai.state import ExtractedRequirements, GraphState
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
 
-class JobRequirementsParsed(BaseModel):
-    """Structured extraction target for a single job posting.
+class MatchResult(BaseModel):
+    """Structured scoring target for a profile/requirements comparison.
 
-    Bound to the model via ``with_structured_output`` so Gemini returns these
-    three disjoint buckets directly instead of free-form prose we would have to
-    re-parse.
+    Bound to the model via ``with_structured_output`` so Gemini returns the
+    score and its justification directly. The skill buckets make the score
+    auditable — they show *which* requirements drove it up or down.
     """
 
-    # Descriptions are deliberately terse: the classification rules live in the
-    # system prompt, so each Field only needs a one-line definition of its bucket.
-    hard_skills: list[str] = Field(
-        default_factory=list,
-        description="Technical tools, languages, frameworks, platforms, certifications.",
+    # No ge/le bound here on purpose: Gemini does not always encode numeric
+    # constraints into its function-calling schema, so an out-of-range value
+    # would raise a ValidationError inside the chain and the node's ``except``
+    # would turn a near-perfect match into 0. We accept the raw int and clamp it
+    # to [0, 100] after the call instead.
+    score: int = Field(
+        description="Overall fit, 0-100. Reserve 90+ for near-perfect matches.",
     )
-    soft_skills: list[str] = Field(
+    matching_skills: list[str] = Field(
         default_factory=list,
-        description="Interpersonal and behavioural competencies.",
+        description="Requirements clearly evidenced in the candidate profile.",
     )
-    core_responsibilities: list[str] = Field(
+    missing_skills: list[str] = Field(
         default_factory=list,
-        description="Primary duties and outcomes the role is accountable for.",
+        description="Requirements absent from the profile, critical ones first.",
     )
+    reasoning: str = Field(
+        description="Brief justification (1-3 sentences) for the score.",
+    )
+
+
+# System prompt for the match node. The recruiter persona plus the explicit
+# anti-inflation rule are load-bearing: ``with_structured_output`` enforces the
+# JSON shape, but only the prompt keeps the score realistic — a low-temperature
+# model otherwise gravitates to flattering round numbers.
+_MATCH_SYSTEM_PROMPT = (
+    "You are a Senior Technical Recruiter scoring how well a candidate's "
+    "profile fits a set of job requirements.\n"
+    "You are given the extracted REQUIREMENTS and the candidate PROFILE. Each "
+    "requirement is tagged with its criticality: [HARD] technical skills are "
+    "critical, [soft] and [resp] items are secondary.\n"
+    "Rules:\n"
+    "- Compare the profile against every requirement individually.\n"
+    "- A requirement counts as matched ONLY if the profile gives explicit "
+    "evidence for it. Do not assume or infer skills that are not stated.\n"
+    "- A related or adjacent technology is NOT a match: e.g. 'FastAPI' does not "
+    "satisfy a 'Django' requirement. Count a match only on the same named "
+    "technology or an explicit superset of it.\n"
+    "- Weight [HARD] requirements far more heavily than [soft]/[resp] ones.\n"
+    "- Score bands: 0-30 = major hard-skill gaps; 31-60 = partial fit, key "
+    "skills missing; 61-85 = strong fit, minor gaps; 86-100 = reserved for "
+    "matching ALL critical hard skills.\n"
+    "- If ANY [HARD] requirement is unmet, the score MUST NOT exceed 70.\n"
+    "- List the matched requirements in matching_skills and the unmet ones in "
+    "missing_skills (most critical first).\n"
+    "- Keep reasoning to 1-3 sentences naming the decisive factors."
+)
 
 
 # System prompt for the extraction node. Kept terse and imperative — the JSON
@@ -76,23 +109,47 @@ def _get_extraction_chain():
     must clear both caches: ``get_llm.cache_clear()`` and
     ``_get_extraction_chain.cache_clear()``.
     """
-    return get_llm().with_structured_output(JobRequirementsParsed)
+    return get_llm().with_structured_output(ExtractedRequirements)
+
+
+@lru_cache(maxsize=1)
+def _get_match_chain():
+    """Return the cached structured-output chain for profile matching.
+
+    Same caching contract as :func:`_get_extraction_chain`: tests swapping the
+    LLM must also call ``_get_match_chain.cache_clear()``.
+    """
+    return get_llm().with_structured_output(MatchResult)
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    """Trim blanks and drop case-insensitive duplicates, keeping first-seen order."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        cleaned = item.strip()
+        key = cleaned.casefold()
+        if cleaned and key not in seen:
+            seen.add(key)
+            out.append(cleaned)
+    return out
 
 
 async def extract_requirements(state: GraphState) -> dict:
-    """Pull the list of requirements out of the job description via Gemini.
+    """Pull the structured requirements out of the job description via Gemini.
 
-    Calls the model with structured output, flattens the three extracted
-    buckets into a single de-duplicated list of strings, and returns it for
-    LangGraph to merge into the state. Any failure (API unavailable, invalid /
-    empty model response) is logged and degrades to an empty list so a single
-    bad call cannot crash the whole graph.
+    Calls the model with structured output and returns the three requirement
+    buckets (de-duplicated, blanks trimmed) for LangGraph to merge into the
+    state. Keeping the buckets separate — rather than flattening to one list —
+    lets ``match_profile`` weight critical hard skills correctly. Any failure
+    (API unavailable, invalid / empty model response) is logged and degrades to
+    empty buckets so a single bad call cannot crash the whole graph.
     """
     logger.info("node", extra={"node": "extract_requirements"})
 
     if not state.job_text or not state.job_text.strip():
         logger.warning("extract_requirements.empty_job_text")
-        return {"extracted_requirements": []}
+        return {"extracted_requirements": ExtractedRequirements()}
 
     try:
         structured_llm = _get_extraction_chain()
@@ -100,38 +157,95 @@ async def extract_requirements(state: GraphState) -> dict:
             SystemMessage(content=_EXTRACT_SYSTEM_PROMPT),
             HumanMessage(content=state.job_text),
         ]
-        parsed: JobRequirementsParsed | None = await structured_llm.ainvoke(messages)
+        parsed: ExtractedRequirements | None = await structured_llm.ainvoke(messages)
     except Exception:  # noqa: BLE001 — node must never crash the graph
         logger.exception("extract_requirements.failed")
-        return {"extracted_requirements": []}
+        return {"extracted_requirements": ExtractedRequirements()}
 
     if parsed is None:
         logger.warning("extract_requirements.no_structured_output")
-        return {"extracted_requirements": []}
+        return {"extracted_requirements": ExtractedRequirements()}
 
-    # Merge the three buckets into one flat list, trimming blanks and
-    # preserving first-seen order while removing duplicates.
-    flat: list[str] = []
-    seen: set[str] = set()
-    for item in (
-        *parsed.hard_skills,
-        *parsed.soft_skills,
-        *parsed.core_responsibilities,
-    ):
-        cleaned = item.strip()
-        key = cleaned.casefold()
-        if cleaned and key not in seen:
-            seen.add(key)
-            flat.append(cleaned)
+    # Clean each bucket independently: trim blanks and drop case-insensitive
+    # duplicates while preserving first-seen order.
+    cleaned = ExtractedRequirements(
+        hard_skills=_dedupe(parsed.hard_skills),
+        soft_skills=_dedupe(parsed.soft_skills),
+        core_responsibilities=_dedupe(parsed.core_responsibilities),
+    )
 
-    logger.info("extract_requirements.done", extra={"count": len(flat)})
-    return {"extracted_requirements": flat}
+    total = (
+        len(cleaned.hard_skills)
+        + len(cleaned.soft_skills)
+        + len(cleaned.core_responsibilities)
+    )
+    logger.info("extract_requirements.done", extra={"count": total})
+    return {"extracted_requirements": cleaned}
 
 
-def match_profile(state: GraphState) -> dict:
-    """Score how well the profile matches the extracted requirements."""
+async def match_profile(state: GraphState) -> dict:
+    """Score how well the profile matches the extracted requirements via Gemini.
+
+    Sends the extracted requirements and the candidate profile to the model
+    with structured output, returning the score plus the matched/missing skill
+    buckets for LangGraph to merge into the state. Any failure (API
+    unavailable, invalid / empty model response) is logged and degrades to a
+    zero score so the graph can still route safely to the end.
+    """
     logger.info("node", extra={"node": "match_profile"})
-    return {"match_score": 0}
+
+    # Nothing to compare against -> a zero score, surfaced explicitly rather
+    # than spending an API call that can only return 0.
+    if not state.profile_text or not state.profile_text.strip():
+        logger.warning("match_profile.empty_profile_text")
+        return {"match_score": 0, "match_reasoning": "No profile provided."}
+    reqs = state.extracted_requirements
+    if reqs.is_empty():
+        logger.warning("match_profile.no_requirements")
+        return {"match_score": 0, "match_reasoning": "No requirements extracted."}
+
+    # Tag each requirement with its criticality so the model can apply the
+    # hard-skill weighting the system prompt asks for — without these labels the
+    # buckets are indistinguishable and the anti-inflation rule is unenforceable.
+    requirement_lines = [
+        *(f"- [HARD] {s}" for s in reqs.hard_skills),
+        *(f"- [soft] {s}" for s in reqs.soft_skills),
+        *(f"- [resp] {s}" for s in reqs.core_responsibilities),
+    ]
+    human_content = (
+        "REQUIREMENTS:\n"
+        + "\n".join(requirement_lines)
+        + f"\n\nPROFILE:\n{state.profile_text}"
+    )
+
+    try:
+        structured_llm = _get_match_chain()
+        messages = [
+            SystemMessage(content=_MATCH_SYSTEM_PROMPT),
+            HumanMessage(content=human_content),
+        ]
+        result: MatchResult | None = await structured_llm.ainvoke(messages)
+    except Exception:  # noqa: BLE001 — node must never crash the graph
+        logger.exception("match_profile.failed")
+        return {"match_score": 0, "match_reasoning": "Error during LLM evaluation."}
+
+    if result is None:
+        logger.warning("match_profile.no_structured_output")
+        return {
+            "match_score": 0,
+            "match_reasoning": "LLM returned no structured output.",
+        }
+
+    # Clamp defensively: the model can return values outside 0-100, and we would
+    # rather cap a near-perfect match than discard it (see MatchResult.score).
+    score = max(0, min(100, result.score))
+    logger.info("match_profile.done", extra={"score": score})
+    return {
+        "match_score": score,
+        "matching_skills": result.matching_skills,
+        "missing_skills": result.missing_skills,
+        "match_reasoning": result.reasoning,
+    }
 
 
 def draft_documents(state: GraphState) -> dict:
