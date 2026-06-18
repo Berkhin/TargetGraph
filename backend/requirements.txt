@@ -10,3 +10,5 @@ alembic>=1.13
 dnspython>=2.6
 aiosmtplib>=3.0
 python-socks>=2.4
+langgraph>=0.2,<0.3
+langchain-google-genai>=2.0,<3.0
