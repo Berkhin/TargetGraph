@@ -74,11 +74,22 @@ class GraphState(BaseModel):
     # --- Inputs (populated before the graph runs) ---
     job_text: str
     profile_text: str
+    # Employer identity for the cold-outreach (recruiter lookup) node. The graph
+    # is otherwise DB-agnostic, but ``find_recruiter_contact`` needs a company to
+    # query Hunter. Lookup precedence: ``company_website`` (the employer's real
+    # domain, most accurate) -> a real domain parsed from ``source_url`` -> the
+    # company name. All default empty so the node degrades gracefully (no lookup)
+    # when the orchestrator omits them.
+    company_name: str = ""
+    source_url: str = ""
+    # The employer's own website (Apify ``companyWebsite``), e.g.
+    # "https://www.gini-apps.com" — the preferred Hunter lookup key.
+    company_website: str | None = None
     # Minimum match score to keep drafting. Below this the graph short-circuits
     # right after ``match_profile`` — no cover letter / CV is generated for a job
     # that will be rejected anyway, saving the LLM calls (and quota). Defaults to
     # the service's MATCHED threshold; the orchestrator injects the real value.
-    score_threshold: int = 70
+    score_threshold: int = 50
 
     # --- Intermediate / output fields (filled in by the nodes) ---
     extracted_requirements: ExtractedRequirements = Field(
@@ -91,6 +102,11 @@ class GraphState(BaseModel):
     matching_skills: list[str] = Field(default_factory=list)
     missing_skills: list[str] = Field(default_factory=list)
     match_reasoning: str = ""
+    # Cold-outreach contact resolved by ``find_recruiter_contact`` (Hunter.io)
+    # before the cover letter is drafted. Both stay None when no named recruiter
+    # is found, in which case the cover letter falls back to a generic greeting.
+    recruiter_name: str | None = None
+    recruiter_email: str | None = None
     cover_letter_draft: str | None = None
     # ATS-optimised résumé produced by ``generate_tailored_cv`` in parallel with
     # the cover letter. Disjoint from ``cover_letter_draft`` so both nodes can
@@ -98,3 +114,11 @@ class GraphState(BaseModel):
     tailored_cv: str | None = None
     review_comments: list[str] = Field(default_factory=list)
     revision_number: int = 0
+    # Set when ``generate_cover_letter`` could not produce a draft (LLM error /
+    # quota). Lets ``should_revise`` stop instead of looping a failing drafter,
+    # and lets the service avoid persisting a broken MATCHED result.
+    drafting_failed: bool = False
+    # Set when an *analysis* node (``extract_requirements`` / ``match_profile``)
+    # failed on an LLM/quota error rather than a genuine no-match. Lets the service
+    # avoid persisting a false REJECTED verdict for a job it never really scored.
+    analysis_failed: bool = False

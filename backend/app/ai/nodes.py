@@ -15,6 +15,7 @@ node, just a sibling that reuses the same LLM/chain machinery.
 from __future__ import annotations
 
 from functools import lru_cache
+from urllib.parse import urlparse
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
@@ -26,9 +27,31 @@ from app.ai.state import (
     GraphState,
     TailoredCV,
 )
+from app.core.config import get_ai_settings
 from app.core.logging import get_logger
+from app.services.hunter_client import HunterClient
 
 logger = get_logger(__name__)
+
+# Job-board / ATS hosts that appear in a posting's ``source_url`` but are NEVER
+# the employer's own domain — so Hunter must not be queried with them. When the
+# source URL resolves to one of these (the LinkedIn sourcing pipeline always
+# does), the recruiter lookup falls back to the company *name* instead.
+_NON_EMPLOYER_HOSTS = frozenset(
+    {
+        "linkedin.com",
+        "indeed.com",
+        "glassdoor.com",
+        "ziprecruiter.com",
+        "monster.com",
+        "dice.com",
+        "lever.co",
+        "greenhouse.io",
+        "workable.com",
+        "smartrecruiters.com",
+        "bamboohr.com",
+    }
+)
 
 
 class MatchResult(BaseModel):
@@ -90,11 +113,38 @@ class RelevanceResult(BaseModel):
     # to [0, 100] after the call rather than risk a ValidationError turning a
     # good match into a dropped row.
     score: int = Field(
-        description="Overall fit, 0-100. Reserve 80+ for postings clearly worth applying to.",
+        description="Relevance 0-100. Under 55 = clearly off-target (wrong field "
+        "/ no overlap); 55+ = plausibly worth showing to the candidate.",
     )
     reason: str = Field(
         description="Brief justification (1-2 sentences) for the score.",
     )
+
+
+# Strict scoring rubric for the full match node (``_MATCH_SYSTEM_PROMPT``) only.
+# This is the *qualification* verdict — it answers "is the candidate actually a
+# fit?" and is deliberately harsh (hard-skill cap, no credit for adjacent tech).
+# The sourcing pre-screen does NOT use this: it asks the looser "is this posting
+# even relevant?" question (see ``_RELEVANCE_SYSTEM_PROMPT``), so a borderline job
+# stays on the board and the strict match decides it later, on click.
+_SCORING_RUBRIC = (
+    "Judge OVERALL fit holistically — the whole candidate against the whole "
+    "role (field, seniority, domain, responsibilities, tech stack, and career "
+    "trajectory). Do NOT score as a checklist of individual skills.\n"
+    "- Neither document is exhaustive: a posting lists only some of its "
+    "requirements, and a CV describes only some of the candidate's experience. "
+    "Reward transferable, adjacent, and clearly implied skills; do NOT penalise "
+    "a missing keyword when the overall background plainly covers it (e.g. "
+    "strong FastAPI experience reasonably covers a generic 'web framework' or "
+    "even a 'Django' need).\n"
+    "- A few unmet requirements are normal and must NOT cap the score when the "
+    "candidate is a sensible overall match for the role.\n"
+    "- Weigh decisive misfits heavily (wrong profession, far-off seniority, no "
+    "real domain overlap), but treat individual missing tools as minor.\n"
+    "- Score bands (overall fit): 0-30 = wrong field / fundamentally unsuitable; "
+    "31-49 = weak, only partial overlap; 50-69 = reasonable fit, worth applying "
+    "despite some gaps; 70-85 = strong fit; 86-100 = excellent, near-ideal fit."
+)
 
 
 # System prompt for the match node. The recruiter persona plus the explicit
@@ -102,25 +152,18 @@ class RelevanceResult(BaseModel):
 # JSON shape, but only the prompt keeps the score realistic — a low-temperature
 # model otherwise gravitates to flattering round numbers.
 _MATCH_SYSTEM_PROMPT = (
-    "You are a Senior Technical Recruiter scoring how well a candidate's "
-    "profile fits a set of job requirements.\n"
-    "You are given the extracted REQUIREMENTS and the candidate PROFILE. Each "
-    "requirement is tagged with its criticality: [HARD] technical skills are "
-    "critical, [soft] and [resp] items are secondary.\n"
+    "You are a Senior Technical Recruiter judging how well a candidate fits a "
+    "role OVERALL.\n"
+    "You are given the full JOB POSTING, a list of extracted KEY REQUIREMENTS "
+    "(reference only — [HARD] = technical, [soft]/[resp] = secondary), and the "
+    "full candidate PROFILE.\n"
+    "Form a single holistic judgment of overall fit — read both sides as a whole, "
+    "not as a per-skill tally.\n"
     "Rules:\n"
-    "- Compare the profile against every requirement individually.\n"
-    "- A requirement counts as matched ONLY if the profile gives explicit "
-    "evidence for it. Do not assume or infer skills that are not stated.\n"
-    "- A related or adjacent technology is NOT a match: e.g. 'FastAPI' does not "
-    "satisfy a 'Django' requirement. Count a match only on the same named "
-    "technology or an explicit superset of it.\n"
-    "- Weight [HARD] requirements far more heavily than [soft]/[resp] ones.\n"
-    "- Score bands: 0-30 = major hard-skill gaps; 31-60 = partial fit, key "
-    "skills missing; 61-85 = strong fit, minor gaps; 86-100 = reserved for "
-    "matching ALL critical hard skills.\n"
-    "- If ANY [HARD] requirement is unmet, the score MUST NOT exceed 70.\n"
-    "- List the matched requirements in matching_skills and the unmet ones in "
-    "missing_skills (most critical first).\n"
+    + _SCORING_RUBRIC
+    + "\n"
+    "- In matching_skills list the main strengths that make the candidate a fit; "
+    "in missing_skills list only the most notable genuine gaps (may be empty).\n"
     "- Keep reasoning to 1-3 sentences naming the decisive factors."
 )
 
@@ -136,6 +179,10 @@ _DRAFT_SYSTEM_PROMPT = (
     "Adopt the professional identity, role, and seniority that the CANDIDATE "
     "PROFILE actually supports — never claim a title, seniority, or specialism "
     "the profile does not back up.\n"
+    "Open with a salutation line: if a RECIPIENT NAME is provided, greet that "
+    "person by their first name (e.g. 'Dear Anna,'); if none is provided, use a "
+    "generic 'Dear Hiring Team,'. Translate the greeting into the posting's "
+    "language. Never invent or guess a recipient name.\n"
     "Structure: exactly three short paragraphs.\n"
     "1. A sharp hook stating, concretely, why you are an excellent fit for this "
     "specific role.\n"
@@ -175,22 +222,29 @@ _EXTRACT_SYSTEM_PROMPT = (
 )
 
 
-# System prompt for the cheap sourcing pre-screen. Mirrors the match node's
-# anti-inflation stance but compressed to a single keep/drop verdict: it runs
-# once per newly sourced posting, before the full pipeline, so a low score keeps
-# an off-target job off the board and out of the (re-)scraping path.
+# System prompt for the cheap sourcing pre-screen. This is a coarse RELEVANCE
+# gate, NOT a qualification verdict (that is the match node's job, on click). It
+# is deliberately GENEROUS: its only purpose is to drop clearly off-target
+# postings (a different profession, no meaningful overlap) so the board is not
+# flooded with noise — borderline jobs the candidate could plausibly apply to
+# must stay. Hence: no hard-skill cap, and adjacent/transferable skills count.
 _RELEVANCE_SYSTEM_PROMPT = (
-    "You are a Senior Technical Recruiter doing a fast first-pass screen of a "
-    "job posting against a candidate profile.\n"
+    "You are a Senior Technical Recruiter doing a fast RELEVANCE screen of a job "
+    "posting against a candidate profile. This is a coarse keep/drop gate before "
+    "a separate, stricter qualification match — so be GENEROUS: the goal is to "
+    "drop only clearly-irrelevant postings, not to judge full qualification.\n"
     "You are given the JOB DESCRIPTION and the candidate PROFILE.\n"
     "Rules:\n"
-    "- Score 0-100 how well this candidate fits this specific job.\n"
-    "- Weight concrete technical (hard) skills far more heavily than soft "
-    "skills or generic responsibilities.\n"
-    "- Be strict: a related-but-different technology is NOT a match. Do not "
-    "inflate the score for adjacent skills.\n"
-    "- Reserve 80+ for postings the candidate is clearly qualified for and "
-    "should apply to.\n"
+    "- Score 0-100 how RELEVANT this posting is to the candidate's field, target "
+    "roles, and overall skill set.\n"
+    "- Count transferable and adjacent skills as positives (a related framework, "
+    "language, or domain still signals relevance). Missing one or two required "
+    "skills is fine — do NOT cap or heavily penalise for it.\n"
+    "- Score under 55 ONLY when the posting is a different profession or shares "
+    "almost no overlap with the candidate's background (e.g. a Mechanical or "
+    "Process Engineer role for a Software Engineer).\n"
+    "- Give 55+ to any posting in the candidate's field with real or transferable "
+    "overlap that is plausibly worth applying to.\n"
     "- Give a 1-2 sentence reason naming the decisive factors."
 )
 
@@ -263,12 +317,17 @@ def _get_match_chain():
 
 @lru_cache(maxsize=1)
 def _get_draft_chain():
-    """Return the cached structured-output chain for document drafting.
+    """Return the cached structured-output chain for cover-letter drafting.
 
-    Same caching contract as :func:`_get_extraction_chain`: tests swapping the
-    LLM must also call ``_get_draft_chain.cache_clear()``.
+    Uses the pro-tier generation model at the cover-letter temperature (higher,
+    for a natural voice). Same caching contract as :func:`_get_extraction_chain`:
+    tests swapping the LLM must also call ``_get_draft_chain.cache_clear()``.
     """
-    return get_llm().with_structured_output(GeneratedDocuments)
+    settings = get_ai_settings()
+    return get_llm(
+        model=settings.gemini_generation_model,
+        temperature=settings.gemini_cover_letter_temperature,
+    ).with_structured_output(GeneratedDocuments)
 
 
 @lru_cache(maxsize=1)
@@ -295,10 +354,16 @@ def _get_relevance_chain():
 def _get_tailored_cv_chain():
     """Return the cached structured-output chain for tailored-CV generation.
 
-    Same caching contract as :func:`_get_extraction_chain`: tests swapping the
-    LLM must also call ``_get_tailored_cv_chain.cache_clear()``.
+    Uses the pro-tier generation model at the (low) tailored-CV temperature, to
+    keep the rewritten experience factual and avoid hallucinating skills. Same
+    caching contract as :func:`_get_extraction_chain`: tests swapping the LLM
+    must also call ``_get_tailored_cv_chain.cache_clear()``.
     """
-    return get_llm().with_structured_output(TailoredCV)
+    settings = get_ai_settings()
+    return get_llm(
+        model=settings.gemini_generation_model,
+        temperature=settings.gemini_tailored_cv_temperature,
+    ).with_structured_output(TailoredCV)
 
 
 def _dedupe(items: list[str]) -> list[str]:
@@ -312,6 +377,46 @@ def _dedupe(items: list[str]) -> list[str]:
             seen.add(key)
             out.append(cleaned)
     return out
+
+
+def _clean_domain(url: str | None) -> str | None:
+    """Reduce any URL or bare host to its clean registrable host, or ``None``.
+
+    Strips the scheme (``http``/``https``), ``www.``, path, and query string,
+    so ``"https://www.gini-apps.com/careers?ref=x"`` -> ``"gini-apps.com"`` and a
+    bare ``"gini-apps.com"`` passes through unchanged. Returns ``None`` for empty
+    input or anything without a dot in the host.
+    """
+    if not url or not url.strip():
+        return None
+    raw = url.strip()
+    # urlparse only populates ``hostname`` when a netloc is present, which needs a
+    # scheme or a leading "//". Inputs like "www.foo.com/x" have neither, so add a
+    # "//" to force netloc parsing (which then drops the path/query for us).
+    if "://" not in raw:
+        raw = "//" + raw
+    host = (urlparse(raw).hostname or "").lower().removeprefix("www.")
+    if not host or "." not in host:
+        return None
+    return host
+
+
+def _employer_domain_from_url(source_url: str) -> str | None:
+    """Extract the employer's own domain from a posting URL, or ``None``.
+
+    Returns the bare host only when it is plausibly the employer's site. Job-board
+    / ATS hosts (LinkedIn, Indeed, Greenhouse, …) are rejected — their domain is
+    the board's, not the company's — so the caller falls back to another lookup
+    key. Anything unparseable yields ``None``.
+    """
+    host = _clean_domain(source_url)
+    if host is None:
+        return None
+    # Reject if the host *is* or is a subdomain of any known non-employer host.
+    for board in _NON_EMPLOYER_HOSTS:
+        if host == board or host.endswith("." + board):
+            return None
+    return host
 
 
 async def extract_requirements(state: GraphState) -> dict:
@@ -339,7 +444,12 @@ async def extract_requirements(state: GraphState) -> dict:
         parsed: ExtractedRequirements | None = await structured_llm.ainvoke(messages)
     except Exception:  # noqa: BLE001 — node must never crash the graph
         logger.exception("extract_requirements.failed")
-        return {"extracted_requirements": ExtractedRequirements()}
+        # Real infra/quota failure (not a genuinely empty posting): flag it so the
+        # service doesn't persist a false REJECTED for a job we never scored.
+        return {
+            "extracted_requirements": ExtractedRequirements(),
+            "analysis_failed": True,
+        }
 
     if parsed is None:
         logger.warning("extract_requirements.no_structured_output")
@@ -363,13 +473,16 @@ async def extract_requirements(state: GraphState) -> dict:
 
 
 async def match_profile(state: GraphState) -> dict:
-    """Score how well the profile matches the extracted requirements via Gemini.
+    """Score the candidate's OVERALL fit for the role via Gemini.
 
-    Sends the extracted requirements and the candidate profile to the model
-    with structured output, returning the score plus the matched/missing skill
-    buckets for LangGraph to merge into the state. Any failure (API
-    unavailable, invalid / empty model response) is logged and degrades to a
-    zero score so the graph can still route safely to the end.
+    Sends the full job posting, the extracted requirements (as a reference hint,
+    not a checklist), and the full candidate profile to the model with structured
+    output, returning a holistic fit score plus the strengths/gaps buckets for
+    LangGraph to merge into the state. The judgment is deliberately lenient —
+    transferable and implied skills count, and a few unmet requirements do not
+    cap the score (see ``_SCORING_RUBRIC``). Any failure (API unavailable,
+    invalid / empty model response) is logged and degrades to a zero score so the
+    graph can still route safely to the end.
     """
     logger.info("node", extra={"node": "match_profile"})
 
@@ -379,22 +492,27 @@ async def match_profile(state: GraphState) -> dict:
         logger.warning("match_profile.empty_profile_text")
         return {"match_score": 0, "match_reasoning": "No profile provided."}
     reqs = state.extracted_requirements
-    if reqs.is_empty():
-        logger.warning("match_profile.no_requirements")
-        return {"match_score": 0, "match_reasoning": "No requirements extracted."}
+    # Holistic scoring judges the full posting against the full profile, so the
+    # extracted requirements are only a hint. Bail only when there is nothing at
+    # all to evaluate the role from (no requirements AND no posting text).
+    if reqs.is_empty() and not (state.job_text and state.job_text.strip()):
+        logger.warning("match_profile.no_job_data")
+        return {"match_score": 0, "match_reasoning": "No job data to evaluate."}
 
-    # Tag each requirement with its criticality so the model can apply the
-    # hard-skill weighting the system prompt asks for — without these labels the
-    # buckets are indistinguishable and the anti-inflation rule is unenforceable.
+    # Extracted requirements are passed as a tagged *reference* (criticality
+    # labels), NOT a checklist — the score is an overall judgment of the whole
+    # profile against the whole posting (which is included in full below).
     requirement_lines = [
         *(f"- [HARD] {s}" for s in reqs.hard_skills),
         *(f"- [soft] {s}" for s in reqs.soft_skills),
         *(f"- [resp] {s}" for s in reqs.core_responsibilities),
     ]
+    requirements_block = "\n".join(requirement_lines) or "(none extracted)"
     human_content = (
-        "REQUIREMENTS:\n"
-        + "\n".join(requirement_lines)
-        + f"\n\nPROFILE:\n{state.profile_text}"
+        f"JOB POSTING:\n{state.job_text}\n\n"
+        f"KEY REQUIREMENTS (extracted, reference only — not a checklist):\n"
+        f"{requirements_block}\n\n"
+        f"CANDIDATE PROFILE (full):\n{state.profile_text}"
     )
 
     try:
@@ -406,7 +524,13 @@ async def match_profile(state: GraphState) -> dict:
         result: MatchResult | None = await structured_llm.ainvoke(messages)
     except Exception:  # noqa: BLE001 — node must never crash the graph
         logger.exception("match_profile.failed")
-        return {"match_score": 0, "match_reasoning": "Error during LLM evaluation."}
+        # Infra/quota failure: flag it so a transient error is not persisted as a
+        # genuine REJECTED verdict (the job stays NEW and can be retried).
+        return {
+            "match_score": 0,
+            "match_reasoning": "Error during LLM evaluation.",
+            "analysis_failed": True,
+        }
 
     if result is None:
         logger.warning("match_profile.no_structured_output")
@@ -427,6 +551,79 @@ async def match_profile(state: GraphState) -> dict:
     }
 
 
+async def find_recruiter_contact(state: GraphState) -> dict:
+    """Resolve a named recruiter / hiring manager for the posting via Hunter.io.
+
+    Runs right before ``generate_cover_letter`` so the letter can be addressed to
+    a real person. The employer domain is resolved by precedence, most accurate
+    first: ``company_website`` (the employer's own site, from Apify) -> a real
+    employer domain parsed out of ``source_url`` (rare here — the sourcing
+    pipeline is LinkedIn-based, whose URLs are never the employer's) -> the
+    ``company_name``, which Hunter resolves server-side. The first returned
+    contact is the most relevant.
+
+    Fail-soft by design: Hunter already degrades any error to an empty list, and
+    this node additionally guards against a missing key/identifier and never
+    raises. When no named contact is found, ``recruiter_name`` / ``recruiter_email``
+    stay ``None`` and the cover letter falls back to a generic greeting.
+    """
+    logger.info("node", extra={"node": "find_recruiter_contact"})
+
+    # Prefer the employer's own website domain; fall back to a non-board domain in
+    # the source URL; the company name is the last resort (Hunter resolves it).
+    domain = _clean_domain(state.company_website) or _employer_domain_from_url(
+        state.source_url
+    )
+    company = state.company_name.strip() or None
+    # Log which identifier we resolved (and from which input) BEFORE the call, so
+    # the cause of a generic greeting is visible even if the request then fails.
+    logger.info(
+        "find_recruiter_contact.lookup",
+        extra={
+            "domain": domain,
+            "company": company,
+            "company_website": state.company_website,
+            "source_url": state.source_url,
+        },
+    )
+    if not domain and not company:
+        logger.warning("find_recruiter_contact.no_identifier")
+        return {"recruiter_name": None, "recruiter_email": None}
+
+    try:
+        contacts = await HunterClient().search_hiring_managers(
+            domain, company=company
+        )
+    except Exception:  # noqa: BLE001 — node must never crash the graph
+        logger.exception("find_recruiter_contact.failed")
+        return {"recruiter_name": None, "recruiter_email": None}
+
+    if not contacts:
+        logger.warning(
+            "find_recruiter_contact.none_found",
+            extra={"domain": domain, "company": company},
+        )
+        return {"recruiter_name": None, "recruiter_email": None}
+
+    # The list is already filtered to personal, named contacts; take the first
+    # (Hunter orders by relevance / confidence) and use its first name for the
+    # salutation. Last name is appended when present for a fuller greeting.
+    top = contacts[0]
+    recruiter_name = " ".join(
+        part for part in (top.first_name, top.last_name) if part
+    ).strip() or None
+    logger.info(
+        "find_recruiter_contact.found",
+        extra={
+            "recruiter_name": recruiter_name,
+            "recruiter_email": top.email,
+            "position": top.position,
+            "candidate_count": len(contacts),
+        },
+    )
+    return {"recruiter_name": recruiter_name, "recruiter_email": top.email}
+
+
 async def generate_cover_letter(state: GraphState) -> dict:
     """Draft the cover letter via Gemini.
 
@@ -440,10 +637,12 @@ async def generate_cover_letter(state: GraphState) -> dict:
     """
     logger.info("node", extra={"node": "generate_cover_letter"})
 
-    # The placeholder every early/error path returns. The revision counter is
-    # incremented only in the reviewer node (the loop's exit point), not here.
+    # Every early/error path flags the failure WITHOUT overwriting any prior draft
+    # (so a failed revision keeps the earlier good letter). On the first pass there
+    # is no prior draft, so ``cover_letter_draft`` simply stays None — the reviewer
+    # then skips and ``should_revise`` ends, instead of looping a failing drafter.
     def _fallback() -> dict:
-        return {"cover_letter_draft": "Error generating document."}
+        return {"drafting_failed": True}
 
     # Refuse to write without grounding. A cover letter is pure fabrication
     # without a profile to draw from, and untailorable without a job posting —
@@ -471,6 +670,12 @@ async def generate_cover_letter(state: GraphState) -> dict:
         f"EXTRACTED REQUIREMENTS:\n{requirements_block}\n\n"
         f"CANDIDATE PROFILE:\n{state.profile_text}"
     )
+
+    # Address the letter to the recruiter ``find_recruiter_contact`` resolved, if
+    # any. Only the first name is needed for the salutation; absence of this line
+    # is the model's cue to fall back to the generic 'Dear Hiring Team' greeting.
+    if state.recruiter_name:
+        human_content += f"\n\nRECIPIENT NAME: {state.recruiter_name}"
 
     # On a revision pass ``should_revise`` routes us back here with the reviewer's
     # comments and the prior draft. Feed both in so the model actually improves
@@ -504,7 +709,7 @@ async def generate_cover_letter(state: GraphState) -> dict:
         return _fallback()
 
     logger.info("generate_cover_letter.done")
-    return {"cover_letter_draft": result.cover_letter}
+    return {"cover_letter_draft": result.cover_letter, "drafting_failed": False}
 
 
 async def generate_tailored_cv(state: GraphState) -> dict:
@@ -573,6 +778,13 @@ async def reviewer(state: GraphState) -> dict:
     comments) so the graph can still route safely to the end.
     """
     logger.info("node", extra={"node": "reviewer"})
+
+    # Review is opt-in: when disabled (the default) skip it entirely — no LLM call,
+    # no revision loop — to conserve the free-tier quota. ``should_revise`` then
+    # ends the graph since there are no comments.
+    if not get_ai_settings().ai_enable_review:
+        logger.info("reviewer.disabled")
+        return {"review_comments": []}
 
     # Guard against empty draft: skip review if there is nothing to review.
     if not state.cover_letter_draft or not state.cover_letter_draft.strip():
@@ -643,8 +855,10 @@ def should_draft(state: GraphState) -> list[str] | str:
     A job scoring below ``score_threshold`` will be rejected regardless of how
     good its cover letter is, so there is no point spending LLM calls drafting
     one. Below the threshold we route straight to the end; at/above it we fan out
-    to both drafting nodes in parallel (returning the two targets as a list is
-    how LangGraph triggers a parallel fan-out from a conditional edge).
+    in parallel (returning the targets as a list is how LangGraph triggers a
+    parallel fan-out from a conditional edge): the tailored CV is drafted
+    directly, while the cover-letter branch first runs ``find_recruiter_contact``
+    so the letter can be addressed to a named recruiter.
     """
     if state.match_score < state.score_threshold:
         logger.info(
@@ -652,7 +866,7 @@ def should_draft(state: GraphState) -> list[str] | str:
             extra={"score": state.match_score, "threshold": state.score_threshold},
         )
         return "__end__"
-    return ["generate_cover_letter", "generate_tailored_cv"]
+    return ["find_recruiter_contact", "generate_tailored_cv"]
 
 
 def should_revise(state: GraphState) -> str:
@@ -663,6 +877,10 @@ def should_revise(state: GraphState) -> str:
     otherwise terminate the graph. The CV branch is never revised — only the
     cover letter is fact-checked by the reviewer.
     """
+    # If the last drafting attempt failed (LLM error / quota), there is nothing to
+    # revise — looping would just burn more failing calls (and minutes of latency).
+    if state.drafting_failed:
+        return "__end__"
     meaningful_comments = [c for c in (state.review_comments or []) if c.strip()]
     if meaningful_comments and state.revision_number < 3:
         return "generate_cover_letter"

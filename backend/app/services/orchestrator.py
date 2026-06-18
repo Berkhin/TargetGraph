@@ -36,9 +36,13 @@ from app.utils.formatters import format_profile_to_markdown
 
 logger = get_logger(__name__)
 
-# Default minimum score to mark a posting MATCHED rather than REJECTED_BY_AI.
-# Kept in sync with the REST ``/match`` endpoint and :func:`run_pipeline`.
-_DEFAULT_SCORE_THRESHOLD = 70
+# Default minimum score to mark a posting MATCHED rather than REJECTED_BY_AI, and
+# the cutoff the graph's drafting gate uses. The single source of truth for the
+# match threshold — referenced by :func:`run_pipeline`, the streaming sibling, and
+# the REST ``/match`` endpoint. Equal to the prompt's hard-skill cap (50): a job
+# missing a critical hard skill is capped at 50 by the rubric, so it can still
+# just reach the bar and get a CV/cover letter drafted.
+_DEFAULT_SCORE_THRESHOLD = 50
 
 # Graph-node names whose completion we forward to the websocket client.
 # ``astream_events`` emits an ``on_chain_end`` for every nested runnable (LLM
@@ -48,6 +52,7 @@ _PIPELINE_NODES = frozenset(
     {
         "extract_requirements",
         "match_profile",
+        "find_recruiter_contact",
         "generate_cover_letter",
         "generate_tailored_cv",
         "reviewer",
@@ -88,7 +93,7 @@ async def run_pipeline(
     profile_id: uuid.UUID,
     session: AsyncSession,
     save_results: bool = False,
-    score_threshold: int = 70,
+    score_threshold: int = _DEFAULT_SCORE_THRESHOLD,
 ) -> dict[str, Any]:
     """Run the full match → draft → review pipeline for one job/profile pair.
 
@@ -129,6 +134,12 @@ async def run_pipeline(
     initial_state: dict[str, Any] = {
         "job_text": job_text,
         "profile_text": profile_text,
+        # Employer identity for the recruiter-lookup node (Hunter.io). Lookup
+        # precedence is company_website -> employer domain from source_url ->
+        # company_name (see find_recruiter_contact).
+        "company_name": job.company_name,
+        "source_url": job.source_url,
+        "company_website": job.company_website,
         # Gate drafting on the same threshold used for MATCHED/REJECTED, so a
         # sub-threshold job is rejected without spending drafting LLM calls.
         "score_threshold": score_threshold,
@@ -167,15 +178,39 @@ async def run_pipeline(
 
     if save_results:
         match_score = result.get("match_score", 0)
-        cover_letter = result.get("cover_letter_draft", "")
+        cover_letter = result.get("cover_letter_draft") or ""
         tailored_cv = result.get("tailored_cv")
+        drafting_failed = bool(result.get("drafting_failed"))
+        analysis_failed = bool(result.get("analysis_failed"))
+        # Analysis failed (LLM/quota): don't persist a false REJECTED — leave NEW.
+        # Matched but drafting failed: don't persist a broken MATCHED — leave NEW.
+        if analysis_failed or (
+            match_score >= score_threshold
+            and (drafting_failed or not cover_letter.strip())
+        ):
+            logger.warning(
+                "pipeline_results_not_saved",
+                extra={
+                    "job_id": str(job_id),
+                    "match_score": match_score,
+                    "analysis_failed": analysis_failed,
+                    "drafting_failed": drafting_failed,
+                },
+            )
+            return result
         status = (
             JobStatus.MATCHED
             if match_score >= score_threshold
             else JobStatus.REJECTED_BY_AI
         )
         await job_repo.save_match_results(
-            job_id, match_score, cover_letter, status, tailored_cv
+            job_id,
+            match_score,
+            cover_letter,
+            status,
+            tailored_cv,
+            recruiter_name=result.get("recruiter_name"),
+            recruiter_email=result.get("recruiter_email"),
         )
         logger.info(
             "pipeline_results_saved",
@@ -302,6 +337,12 @@ async def run_pipeline_stream(
     initial_state: dict[str, Any] = {
         "job_text": _build_job_text(job.job_title, job.company_name, job.description),
         "profile_text": format_profile_to_markdown(profile),
+        # Employer identity for the recruiter-lookup node (Hunter.io). Lookup
+        # precedence is company_website -> employer domain from source_url ->
+        # company_name (see find_recruiter_contact).
+        "company_name": job.company_name,
+        "source_url": job.source_url,
+        "company_website": job.company_website,
         # Gate drafting on the same threshold used for MATCHED/REJECTED, so a
         # sub-threshold job is rejected without spending drafting LLM calls.
         "score_threshold": score_threshold,
@@ -345,6 +386,16 @@ async def run_pipeline_stream(
                         "reason": output.get("match_reasoning"),
                     }
                 )
+            elif node == "find_recruiter_contact":
+                # Surface what the Hunter.io lookup resolved (or that nothing was
+                # found, hence the generic 'Dear Hiring Team' greeting).
+                await websocket.send_json(
+                    {
+                        "step": "find_recruiter_contact",
+                        "recruiter_name": output.get("recruiter_name"),
+                        "recruiter_email": output.get("recruiter_email"),
+                    }
+                )
             else:
                 await websocket.send_json(
                     {"step": node, "message": f"Шаг '{node}' завершён"}
@@ -380,6 +431,40 @@ async def run_pipeline_stream(
     match_score = final_state.get("match_score") or 0
     cover_letter = final_state.get("cover_letter_draft") or ""
     tailored_cv = final_state.get("tailored_cv")
+    drafting_failed = bool(final_state.get("drafting_failed"))
+    analysis_failed = bool(final_state.get("analysis_failed"))
+
+    # The job could not be evaluated (LLM/quota error during extract/match). Don't
+    # persist a false REJECTED — leave it NEW and retryable, and say why.
+    if analysis_failed:
+        logger.warning(
+            "pipeline_stream_analysis_unavailable",
+            extra={"job_id": str(job_id)},
+        )
+        await _safe_error(
+            websocket,
+            "Не удалось оценить вакансию (лимит/квота модели). "
+            "Вакансия осталась в списке — попробуйте позже.",
+        )
+        return
+
+    # Matched on score, but the cover letter could not be generated (e.g. the
+    # generation model hit its quota). Don't persist a broken MATCHED — leave the
+    # job NEW so it can be retried once quota is back, and tell the user why.
+    if match_score >= score_threshold and (
+        drafting_failed or not cover_letter.strip()
+    ):
+        logger.warning(
+            "pipeline_stream_generation_unavailable",
+            extra={"job_id": str(job_id), "match_score": match_score},
+        )
+        await _safe_error(
+            websocket,
+            f"Совпадение {match_score}%, но генерация недоступна "
+            "(лимит/квота модели). Вакансия осталась в списке — попробуйте позже.",
+        )
+        return
+
     result_status = (
         JobStatus.MATCHED
         if match_score >= score_threshold
@@ -388,7 +473,13 @@ async def run_pipeline_stream(
     try:
         async with session_factory() as session:
             await JobRepository(session).save_match_results(
-                job_id, match_score, cover_letter, result_status, tailored_cv
+                job_id,
+                match_score,
+                cover_letter,
+                result_status,
+                tailored_cv,
+                recruiter_name=final_state.get("recruiter_name"),
+                recruiter_email=final_state.get("recruiter_email"),
             )
             await session.commit()
     except Exception:  # noqa: BLE001 — surface to the client, never crash the server
