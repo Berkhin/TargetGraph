@@ -474,6 +474,31 @@ def get_gmail_settings() -> GmailSettings:
     return GmailSettings()
 
 
+class OutreachSettings(BaseSettings):
+    """Settings for cold-outreach email *content* (the disclaimer postscript).
+
+    Every recruiter email gets an auto-appended "Engineering Disclaimer" that
+    advertises the system that sent it and links to its source. Only the
+    repository URL varies per operator, so it is the single tunable here.
+    """
+
+    model_config = SettingsConfigDict(
+        env_file=_ENV_FILE, env_file_encoding="utf-8", extra="ignore"
+    )
+
+    github_url: str = Field(
+        default="https://github.com/Berkhin/TargetGraph",
+        validation_alias="OUTREACH_GITHUB_URL",
+        description="Repository URL advertised in the outreach disclaimer postscript.",
+    )
+
+
+@lru_cache
+def get_outreach_settings() -> OutreachSettings:
+    """Return a process-wide cached outreach settings instance."""
+    return OutreachSettings()
+
+
 class CORSSettings(BaseSettings):
     """Cross-Origin Resource Sharing policy for the browser SPA frontend.
 
