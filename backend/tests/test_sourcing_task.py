@@ -119,9 +119,9 @@ async def test_persists_new_jobs_and_dedups_on_second_run(factory, monkeypatch) 
     async def fake_fetch(query, location, *, client=None):
         # A single-title profile still becomes a quoted Boolean query.
         assert query == '"AI Engineer"'
-        # force_default_location defaults True, so the profile's "Berlin" is
-        # ignored in favour of the configured default with dense coverage.
-        assert location == "Israel"
+        # force_default_location defaults False, so the search region comes from
+        # the profile ("Berlin"), not the configured fallback.
+        assert location == "Berlin"
         return [_raw("a"), _raw("b")]
 
     monkeypatch.setattr(sourcing_task, "fetch_jobs_from_apify", fake_fetch)
@@ -198,9 +198,14 @@ async def test_falls_back_to_default_location(factory, monkeypatch) -> None:
 
 
 async def test_force_default_location_overrides_profile(factory, monkeypatch) -> None:
-    # With the default flag on, a profile's own location is ignored (some regions
-    # return little on LinkedIn, e.g. "Tel Aviv").
+    # When the flag is explicitly enabled, a profile's own location is ignored
+    # (some regions return little on LinkedIn, e.g. "Tel Aviv").
     await _seed_profile(factory, target_titles=["AI Engineer"], location="Tel Aviv")
+
+    monkeypatch.setenv("APIFY_TOKEN", "test-token")
+    monkeypatch.setenv("SOURCING_FORCE_DEFAULT_LOCATION", "true")
+    settings = SourcingSettings()
+    monkeypatch.setattr(sourcing_task, "get_sourcing_settings", lambda: settings)
 
     seen_locations: list[str] = []
 

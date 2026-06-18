@@ -45,8 +45,14 @@ APScheduler (lifespan) ──► run_sourcing_job (tasks/sourcing_task.py)
 percent-кодирует Boolean-запрос и локацию:
 
 ```
-https://www.linkedin.com/jobs/search/?keywords=%22AI+Engineer%22&location=Israel
+https://www.linkedin.com/jobs/search/?keywords=%22AI+Engineer%22&location=Israel&geoId=101620260
 ```
+
+> Гостевой поиск LinkedIn надёжно фильтрует по региону только при наличии
+> числового `geoId`; одного текстового `location` недостаточно — LinkedIn
+> матчит его нестрого и часто отдаёт широкую / US-выдачу. `_resolve_geo_id`
+> подставляет `geoId` для поддерживаемых локаций (см. `_LINKEDIN_GEO_IDS`);
+> неизвестная локация отправляется только текстом.
 
 Итоговый `run_input`:
 
@@ -89,8 +95,8 @@ https://www.linkedin.com/jobs/search/?keywords=%22AI+Engineer%22&location=Israel
 | ------------------------------------ | ------------------------------------- | ---------- |
 | `APIFY_TOKEN`                        | — (**обязателен**)                    | Токен ApifyClientAsync |
 | `APIFY_ACTOR_ID`                     | `curious_coder/linkedin-jobs-scraper` | ID актора |
-| `SOURCING_LOCATION`                  | `Israel`                              | Локация-fallback |
-| `SOURCING_FORCE_DEFAULT_LOCATION`    | `true`                                | Игнорировать локацию профиля (плотное покрытие) |
+| `SOURCING_LOCATION`                  | `Israel`                              | Локация-fallback, если профиль её не задал |
+| `SOURCING_FORCE_DEFAULT_LOCATION`    | `false`                               | По умолчанию регион берётся из профиля; `true` — принудительно `SOURCING_LOCATION` для всех |
 | `SOURCING_INTERVAL_HOURS`            | `24`                                  | Период запуска планировщика |
 | `SOURCING_PAGES`                     | `1` (1–10)                            | Страницы результата → `count = pages*25` |
 | `SOURCING_MAX_RUNS_PER_TASK`         | `1`                                   | Предохранитель бюджета: запусков актора за тик |

@@ -11,7 +11,3 @@ export type { JobStatus };
 // Mirrors JobRead. NOTE: real field names are `job_title` / `company_name` /
 // `match_score` / `cover_letter_draft` (not title/company/score/cover_letter).
 export type JobRead = Job;
-
-// Mirrors JobMatchResponse — backend extends JobRead with the post-pipeline
-// state (match_score, cover_letter_draft, status all populated).
-export type JobMatchResponse = JobRead;

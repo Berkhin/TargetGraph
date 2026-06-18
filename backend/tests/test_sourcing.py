@@ -14,6 +14,7 @@ from app.models.schemas.job import JobCreate
 from app.services import sourcing
 from app.services.sourcing import (
     SourcingError,
+    _resolve_geo_id,
     _to_job_create,
     fetch_jobs_from_apify,
 )
@@ -114,18 +115,31 @@ async def test_fetch_sends_expected_run_input() -> None:
     await fetch_jobs_from_apify('"Eng"', "Israel", client=client)
 
     # The actor is URL-driven: the (query, location) pair is encoded into a
-    # LinkedIn guest search URL passed as the required ``urls`` input, and the
-    # cost-bounding ``pages`` setting (default 1) is translated into ``count``.
+    # LinkedIn guest search URL passed as the required ``urls`` input (with a
+    # resolved geoId so LinkedIn geo-filters), and the cost-bounding ``pages``
+    # setting (default 1) is translated into ``count``.
     assert client.actor_client.run_inputs == [
         {
             "urls": [
                 "https://www.linkedin.com/jobs/search/"
-                "?keywords=%22Eng%22&location=Israel"
+                "?keywords=%22Eng%22&location=Israel&geoId=101620260"
             ],
             "count": 25,
             "scrapeCompany": False,
         }
     ]
+
+
+def test_resolve_geo_id_matches_country_and_comma_tail() -> None:
+    # Exact country name, and a "City, Country" string resolving via its tail.
+    assert _resolve_geo_id("Israel") == "101620260"
+    assert _resolve_geo_id("Tel Aviv-Yafo, Israel") == "101620260"
+    assert _resolve_geo_id("  USA  ") == "103644278"
+
+
+def test_resolve_geo_id_unknown_location_returns_none() -> None:
+    # An unsupported location yields None, so the caller sends only the text param.
+    assert _resolve_geo_id("Atlantis") is None
 
 
 async def test_fetch_actor_error_raises_sourcing_error() -> None:

@@ -366,6 +366,17 @@ def _get_tailored_cv_chain():
     ).with_structured_output(TailoredCV)
 
 
+def _clamp_score(score: int) -> int:
+    """Clamp a model-returned score to [0, 100].
+
+    Gemini can return values outside the band (no numeric constraint is encoded
+    into its function-calling schema — see ``MatchResult.score``); we would rather
+    cap a near-perfect match than discard it. Shared by ``match_profile`` and the
+    sourcing pre-screen.
+    """
+    return max(0, min(100, score))
+
+
 def _dedupe(items: list[str]) -> list[str]:
     """Trim blanks and drop case-insensitive duplicates, keeping first-seen order."""
     out: list[str] = []
@@ -502,12 +513,7 @@ async def match_profile(state: GraphState) -> dict:
     # Extracted requirements are passed as a tagged *reference* (criticality
     # labels), NOT a checklist — the score is an overall judgment of the whole
     # profile against the whole posting (which is included in full below).
-    requirement_lines = [
-        *(f"- [HARD] {s}" for s in reqs.hard_skills),
-        *(f"- [soft] {s}" for s in reqs.soft_skills),
-        *(f"- [resp] {s}" for s in reqs.core_responsibilities),
-    ]
-    requirements_block = "\n".join(requirement_lines) or "(none extracted)"
+    requirements_block = reqs.to_prompt_block()
     human_content = (
         f"JOB POSTING:\n{state.job_text}\n\n"
         f"KEY REQUIREMENTS (extracted, reference only — not a checklist):\n"
@@ -539,9 +545,7 @@ async def match_profile(state: GraphState) -> dict:
             "match_reasoning": "LLM returned no structured output.",
         }
 
-    # Clamp defensively: the model can return values outside 0-100, and we would
-    # rather cap a near-perfect match than discard it (see MatchResult.score).
-    score = max(0, min(100, result.score))
+    score = _clamp_score(result.score)
     logger.info("match_profile.done", extra={"score": score})
     return {
         "match_score": score,
@@ -659,12 +663,7 @@ async def generate_cover_letter(state: GraphState) -> dict:
     # candidate profile, and the requirements isolated on the previous step
     # (tagged by criticality so the letter can lead with the hard skills).
     reqs = state.extracted_requirements
-    requirement_lines = [
-        *(f"- [HARD] {s}" for s in reqs.hard_skills),
-        *(f"- [soft] {s}" for s in reqs.soft_skills),
-        *(f"- [resp] {s}" for s in reqs.core_responsibilities),
-    ]
-    requirements_block = "\n".join(requirement_lines) or "(none extracted)"
+    requirements_block = reqs.to_prompt_block()
     human_content = (
         f"JOB POSTING:\n{state.job_text}\n\n"
         f"EXTRACTED REQUIREMENTS:\n{requirements_block}\n\n"
@@ -735,12 +734,7 @@ async def generate_tailored_cv(state: GraphState) -> dict:
         return {"tailored_cv": None}
 
     reqs = state.extracted_requirements
-    requirement_lines = [
-        *(f"- [HARD] {s}" for s in reqs.hard_skills),
-        *(f"- [soft] {s}" for s in reqs.soft_skills),
-        *(f"- [resp] {s}" for s in reqs.core_responsibilities),
-    ]
-    requirements_block = "\n".join(requirement_lines) or "(none extracted)"
+    requirements_block = reqs.to_prompt_block()
     human_content = (
         f"JOB POSTING:\n{state.job_text}\n\n"
         f"EXTRACTED REQUIREMENTS:\n{requirements_block}\n\n"
@@ -799,12 +793,7 @@ async def reviewer(state: GraphState) -> dict:
     # Build the human prompt: draft, profile, and extracted requirements so the
     # reviewer can check against all three sources.
     reqs = state.extracted_requirements
-    requirement_lines = [
-        *(f"- [HARD] {s}" for s in reqs.hard_skills),
-        *(f"- [soft] {s}" for s in reqs.soft_skills),
-        *(f"- [resp] {s}" for s in reqs.core_responsibilities),
-    ]
-    requirements_block = "\n".join(requirement_lines) or "(none extracted)"
+    requirements_block = reqs.to_prompt_block()
     human_content = (
         f"COVER LETTER DRAFT:\n{state.cover_letter_draft}\n\n"
         f"EXTRACTED REQUIREMENTS:\n{requirements_block}\n\n"
@@ -922,6 +911,5 @@ async def evaluate_job_relevance(job_description: str, profile_data: str) -> dic
         logger.warning("evaluate_job_relevance.no_structured_output")
         return {"score": None, "reason": "Pre-screen returned no structured output."}
 
-    # Clamp defensively (see RelevanceResult.score / MatchResult.score).
-    score = max(0, min(100, result.score))
+    score = _clamp_score(result.score)
     return {"score": score, "reason": result.reason}

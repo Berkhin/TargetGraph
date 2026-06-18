@@ -21,6 +21,7 @@ import asyncio
 import time
 import uuid
 from contextlib import suppress
+from dataclasses import dataclass
 from typing import Any
 
 from fastapi import WebSocket, WebSocketDisconnect
@@ -30,6 +31,8 @@ from app.ai.orchestrator import compiled_graph
 from app.core.logging import get_logger
 from app.db.database import AsyncSessionLocal
 from app.models.enums import JobStatus
+from app.models.schemas.job import JobRead
+from app.models.schemas.profile import ProfileRead
 from app.repositories.job_repository import JobRepository
 from app.repositories.profile_repository import ProfileRepository
 from app.utils.formatters import format_profile_to_markdown
@@ -83,57 +86,95 @@ class PipelineExecutionError(PipelineError):
         self.cause = cause
 
 
+class PipelineDegradedError(PipelineError):
+    """The pipeline ran but produced no persistable verdict (model quota).
+
+    Either the job could not be scored (``analysis_failed``) or it matched but the
+    cover letter could not be generated. Nothing is persisted, so the job stays
+    ``NEW`` and retryable; the API layer maps this to a 503.
+    """
+
+
+# --------------------------------------------------------------------------- #
+# Match verdict                                                                #
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class MatchOutcome:
+    """The persistable verdict distilled from the graph's final state.
+
+    Single source of truth for the save/skip decision shared by the REST
+    endpoint and the streaming sibling: the MATCHED/REJECTED threshold rule and
+    the "never persist a false verdict" guard live here, not at each call site.
+    ``analysis_failed`` (the job could not be scored) and ``generation_unavailable``
+    (matched, but the letter failed) are kept distinct so the streaming path can
+    report a different message for each.
+    """
+
+    match_score: int
+    match_reasoning: str
+    cover_letter: str
+    tailored_cv: str | None
+    recruiter_name: str | None
+    recruiter_email: str | None
+    analysis_failed: bool
+    drafting_failed: bool
+    score_threshold: int
+
+    @property
+    def is_match(self) -> bool:
+        return self.match_score >= self.score_threshold
+
+    @property
+    def status(self) -> JobStatus:
+        return JobStatus.MATCHED if self.is_match else JobStatus.REJECTED_BY_AI
+
+    @property
+    def generation_unavailable(self) -> bool:
+        """Matched on score, but no usable cover letter was produced."""
+        return self.is_match and (self.drafting_failed or not self.cover_letter.strip())
+
+    @property
+    def can_persist(self) -> bool:
+        """False when saving would record a false REJECTED or a broken MATCHED."""
+        return not (self.analysis_failed or self.generation_unavailable)
+
+
+def parse_match_outcome(state: dict[str, Any], score_threshold: int) -> MatchOutcome:
+    """Distil a graph final-state dict into a :class:`MatchOutcome`.
+
+    Coerces the score with ``or 0`` so an explicit ``None`` from a degraded node
+    never reaches the threshold comparison (which would raise on ``None >= int``).
+    """
+    return MatchOutcome(
+        match_score=state.get("match_score") or 0,
+        match_reasoning=state.get("match_reasoning", ""),
+        cover_letter=state.get("cover_letter_draft") or "",
+        tailored_cv=state.get("tailored_cv"),
+        recruiter_name=state.get("recruiter_name"),
+        recruiter_email=state.get("recruiter_email"),
+        analysis_failed=bool(state.get("analysis_failed")),
+        drafting_failed=bool(state.get("drafting_failed")),
+        score_threshold=score_threshold,
+    )
+
+
 def _build_job_text(job_title: str, company_name: str, description: str) -> str:
     """Collapse a posting's salient fields into a single prompt-ready block."""
     return f"# {job_title}\n**Company:** {company_name}\n\n{description}"
 
 
-async def run_pipeline(
-    job_id: uuid.UUID,
-    profile_id: uuid.UUID,
-    session: AsyncSession,
-    save_results: bool = False,
-    score_threshold: int = _DEFAULT_SCORE_THRESHOLD,
+def build_initial_state(
+    job: JobRead, profile: ProfileRead, score_threshold: int
 ) -> dict[str, Any]:
-    """Run the full match → draft → review pipeline for one job/profile pair.
+    """Render a job + profile into the graph's initial state dict.
 
-    Orchestrates: resolves both aggregates through repositories, formats them
-    into graph text inputs, invokes the compiled graph, and optionally saves
-    results back to the job posting.
-
-    Args:
-        job_id: Identifier of the target job posting.
-        profile_id: Identifier of the candidate's master profile.
-        session: Active async unit-of-work, shared by both repositories.
-        save_results: If ``True``, persist match results to the database.
-        score_threshold: Minimum match score to mark as MATCHED (vs REJECTED_BY_AI).
-
-    Returns:
-        The graph's final state as a plain ``dict`` (match score, drafts,
-        review comments, etc.).
-
-    Raises:
-        JobNotFoundError: If ``job_id`` resolves to no posting.
-        ProfileNotFoundError: If ``profile_id`` resolves to no profile.
-        PipelineExecutionError: If graph invocation fails.
+    Shared by :func:`run_pipeline` and :func:`run_pipeline_stream` so both feed
+    the graph identical inputs: the job/profile text, the employer identity the
+    recruiter-lookup node needs, and the drafting threshold.
     """
-    job_repo = JobRepository(session)
-    profile_repo = ProfileRepository(session)
-
-    job = await job_repo.get_by_id(job_id)
-    if job is None:
-        raise JobNotFoundError(f"job posting {job_id} not found")
-
-    profile = await profile_repo.get_full_profile(profile_id)
-    if profile is None:
-        raise ProfileNotFoundError(f"master profile {profile_id} not found")
-
-    job_text = _build_job_text(job.job_title, job.company_name, job.description)
-    profile_text = format_profile_to_markdown(profile)
-
-    initial_state: dict[str, Any] = {
-        "job_text": job_text,
-        "profile_text": profile_text,
+    return {
+        "job_text": _build_job_text(job.job_title, job.company_name, job.description),
+        "profile_text": format_profile_to_markdown(profile),
         # Employer identity for the recruiter-lookup node (Hunter.io). Lookup
         # precedence is company_website -> employer domain from source_url ->
         # company_name (see find_recruiter_contact).
@@ -144,6 +185,46 @@ async def run_pipeline(
         # sub-threshold job is rejected without spending drafting LLM calls.
         "score_threshold": score_threshold,
     }
+
+
+async def run_pipeline(
+    job_id: uuid.UUID,
+    profile_id: uuid.UUID,
+    session: AsyncSession,
+    score_threshold: int = _DEFAULT_SCORE_THRESHOLD,
+) -> dict[str, Any]:
+    """Run the full match → draft → review pipeline for one job/profile pair.
+
+    Pure orchestration, no persistence: resolves both aggregates through
+    repositories, formats them into graph text inputs, invokes the compiled
+    graph, and returns the final state. Persisting the verdict is the caller's
+    job (see :func:`match_and_save`), which keeps this function reusable for
+    read-only/preview runs.
+
+    Args:
+        job_id: Identifier of the target job posting.
+        profile_id: Identifier of the candidate's master profile.
+        session: Active async unit-of-work, shared by both repositories.
+        score_threshold: Drafting gate — sub-threshold jobs skip the draft nodes.
+
+    Returns:
+        The graph's final state as a plain ``dict`` (match score, drafts,
+        review comments, etc.).
+
+    Raises:
+        JobNotFoundError: If ``job_id`` resolves to no posting.
+        ProfileNotFoundError: If ``profile_id`` resolves to no profile.
+        PipelineExecutionError: If graph invocation fails.
+    """
+    job = await JobRepository(session).get_by_id(job_id)
+    if job is None:
+        raise JobNotFoundError(f"job posting {job_id} not found")
+
+    profile = await ProfileRepository(session).get_full_profile(profile_id)
+    if profile is None:
+        raise ProfileNotFoundError(f"master profile {profile_id} not found")
+
+    initial_state = build_initial_state(job, profile, score_threshold)
 
     logger.info(
         "pipeline_started",
@@ -175,53 +256,69 @@ async def run_pipeline(
             "match_score": result.get("match_score"),
         },
     )
+    return result
 
-    if save_results:
-        match_score = result.get("match_score", 0)
-        cover_letter = result.get("cover_letter_draft") or ""
-        tailored_cv = result.get("tailored_cv")
-        drafting_failed = bool(result.get("drafting_failed"))
-        analysis_failed = bool(result.get("analysis_failed"))
-        # Analysis failed (LLM/quota): don't persist a false REJECTED — leave NEW.
-        # Matched but drafting failed: don't persist a broken MATCHED — leave NEW.
-        if analysis_failed or (
-            match_score >= score_threshold
-            and (drafting_failed or not cover_letter.strip())
-        ):
-            logger.warning(
-                "pipeline_results_not_saved",
-                extra={
-                    "job_id": str(job_id),
-                    "match_score": match_score,
-                    "analysis_failed": analysis_failed,
-                    "drafting_failed": drafting_failed,
-                },
-            )
-            return result
-        status = (
-            JobStatus.MATCHED
-            if match_score >= score_threshold
-            else JobStatus.REJECTED_BY_AI
-        )
-        await job_repo.save_match_results(
-            job_id,
-            match_score,
-            cover_letter,
-            status,
-            tailored_cv,
-            recruiter_name=result.get("recruiter_name"),
-            recruiter_email=result.get("recruiter_email"),
-        )
-        logger.info(
-            "pipeline_results_saved",
+
+async def match_and_save(
+    job_id: uuid.UUID,
+    profile_id: uuid.UUID,
+    session: AsyncSession,
+    score_threshold: int = _DEFAULT_SCORE_THRESHOLD,
+) -> JobRead:
+    """Run the pipeline for a job/profile, persist the verdict, return the job.
+
+    The single service entry point behind the REST ``/match`` endpoint: it keeps
+    the threshold/persist decision out of the router, which only maps the domain
+    exceptions to HTTP status codes.
+
+    Raises:
+        JobNotFoundError / ProfileNotFoundError: unknown id (from run_pipeline).
+        PipelineExecutionError: graph invocation failed (from run_pipeline).
+        PipelineDegradedError: nothing persistable was produced (model quota) —
+            the job is left ``NEW`` and retryable.
+    """
+    result = await run_pipeline(job_id, profile_id, session, score_threshold)
+    outcome = parse_match_outcome(result, score_threshold)
+
+    if not outcome.can_persist:
+        logger.warning(
+            "match_results_unavailable",
             extra={
                 "job_id": str(job_id),
-                "match_score": match_score,
-                "status": status.value,
+                "match_score": outcome.match_score,
+                "analysis_failed": outcome.analysis_failed,
+                "drafting_failed": outcome.drafting_failed,
             },
         )
+        raise PipelineDegradedError(
+            "AI evaluation/generation is unavailable (model quota)."
+        )
 
-    return result
+    saved = await JobRepository(session).save_match_results(
+        job_id,
+        outcome.match_score,
+        outcome.cover_letter,
+        outcome.status,
+        outcome.tailored_cv,
+        recruiter_name=outcome.recruiter_name,
+        recruiter_email=outcome.recruiter_email,
+    )
+    if saved is None:
+        # The posting existed when run_pipeline loaded it; vanishing mid-request
+        # is an integrity failure, not a routine 404.
+        raise PipelineExecutionError(
+            f"job posting {job_id} disappeared after matching"
+        )
+
+    logger.info(
+        "pipeline_results_saved",
+        extra={
+            "job_id": str(job_id),
+            "match_score": outcome.match_score,
+            "status": outcome.status.value,
+        },
+    )
+    return saved
 
 
 async def _safe_send(websocket: WebSocket, payload: dict[str, Any]) -> None:
@@ -334,19 +431,7 @@ async def run_pipeline_stream(
         await _safe_error(websocket, f"profile {profile_id} not found")
         return
 
-    initial_state: dict[str, Any] = {
-        "job_text": _build_job_text(job.job_title, job.company_name, job.description),
-        "profile_text": format_profile_to_markdown(profile),
-        # Employer identity for the recruiter-lookup node (Hunter.io). Lookup
-        # precedence is company_website -> employer domain from source_url ->
-        # company_name (see find_recruiter_contact).
-        "company_name": job.company_name,
-        "source_url": job.source_url,
-        "company_website": job.company_website,
-        # Gate drafting on the same threshold used for MATCHED/REJECTED, so a
-        # sub-threshold job is rejected without spending drafting LLM calls.
-        "score_threshold": score_threshold,
-    }
+    initial_state = build_initial_state(job, profile, score_threshold)
     await _safe_send(websocket, {"step": "init", "message": "Данные загружены"})
     logger.info(
         "pipeline_stream_started",
@@ -356,8 +441,8 @@ async def run_pipeline_stream(
 
     # --- 2) Drive the graph holding NO db connection ------------------------
     # Merge every node's partial output into ``final_state`` as it lands. Last
-    # write wins, which is exactly right for ``draft_documents`` (it may re-run in
-    # the revision loop, leaving the latest cover letter). A watcher task lets us
+    # write wins, which is exactly right for ``generate_cover_letter`` (it may re-run
+    # in the revision loop, leaving the latest cover letter). A watcher task lets us
     # bail the moment the client goes away.
     watcher = asyncio.create_task(_watch_disconnect(websocket))
     final_state: dict[str, Any] = dict(initial_state)
@@ -428,15 +513,11 @@ async def run_pipeline_stream(
             await watcher
 
     # --- 3) Short write session: its own atomic unit of work ----------------
-    match_score = final_state.get("match_score") or 0
-    cover_letter = final_state.get("cover_letter_draft") or ""
-    tailored_cv = final_state.get("tailored_cv")
-    drafting_failed = bool(final_state.get("drafting_failed"))
-    analysis_failed = bool(final_state.get("analysis_failed"))
+    outcome = parse_match_outcome(final_state, score_threshold)
 
     # The job could not be evaluated (LLM/quota error during extract/match). Don't
     # persist a false REJECTED — leave it NEW and retryable, and say why.
-    if analysis_failed:
+    if outcome.analysis_failed:
         logger.warning(
             "pipeline_stream_analysis_unavailable",
             extra={"job_id": str(job_id)},
@@ -451,35 +532,29 @@ async def run_pipeline_stream(
     # Matched on score, but the cover letter could not be generated (e.g. the
     # generation model hit its quota). Don't persist a broken MATCHED — leave the
     # job NEW so it can be retried once quota is back, and tell the user why.
-    if match_score >= score_threshold and (
-        drafting_failed or not cover_letter.strip()
-    ):
+    if outcome.generation_unavailable:
         logger.warning(
             "pipeline_stream_generation_unavailable",
-            extra={"job_id": str(job_id), "match_score": match_score},
+            extra={"job_id": str(job_id), "match_score": outcome.match_score},
         )
         await _safe_error(
             websocket,
-            f"Совпадение {match_score}%, но генерация недоступна "
+            f"Совпадение {outcome.match_score}%, но генерация недоступна "
             "(лимит/квота модели). Вакансия осталась в списке — попробуйте позже.",
         )
         return
 
-    result_status = (
-        JobStatus.MATCHED
-        if match_score >= score_threshold
-        else JobStatus.REJECTED_BY_AI
-    )
+    result_status = outcome.status
     try:
         async with session_factory() as session:
             await JobRepository(session).save_match_results(
                 job_id,
-                match_score,
-                cover_letter,
+                outcome.match_score,
+                outcome.cover_letter,
                 result_status,
-                tailored_cv,
-                recruiter_name=final_state.get("recruiter_name"),
-                recruiter_email=final_state.get("recruiter_email"),
+                outcome.tailored_cv,
+                recruiter_name=outcome.recruiter_name,
+                recruiter_email=outcome.recruiter_email,
             )
             await session.commit()
     except Exception:  # noqa: BLE001 — surface to the client, never crash the server
@@ -494,7 +569,7 @@ async def run_pipeline_stream(
         "pipeline_stream_finished",
         extra={
             "job_id": str(job_id),
-            "match_score": match_score,
+            "match_score": outcome.match_score,
             "status": result_status.value,
             "elapsed_s": round(time.perf_counter() - started, 3),
         },
@@ -508,10 +583,10 @@ async def run_pipeline_stream(
         {
             "step": "done",
             "status": result_status.value,
-            "score": match_score,
-            "reason": final_state.get("match_reasoning", ""),
-            "cover_letter_draft": cover_letter or None,
-            "tailored_cv_draft": tailored_cv or None,
+            "score": outcome.match_score,
+            "reason": outcome.match_reasoning,
+            "cover_letter_draft": outcome.cover_letter or None,
+            "tailored_cv_draft": outcome.tailored_cv or None,
         },
     )
     await _safe_close(websocket)
