@@ -34,6 +34,9 @@ pgdata/
 .env
 .env.*
 !.env.example  # Файл с примерами переменных коммитить МОЖНО
+# Gmail OAuth secrets (cold outreach) — never commit
+credentials.json
+token.json
 
 # =========================
 # 5. OS & IDE
