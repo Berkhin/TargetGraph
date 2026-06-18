@@ -38,6 +38,12 @@ export type OutreachSendResponse = {
   to_email: string;
 };
 
+// DELETE /jobs/{id} — soft-delete a posting (backend marks it DISCARDED). The
+// row is kept for sourcing dedup; it just drops off every board. Returns 204.
+export async function deleteJob(jobId: string): Promise<void> {
+  await apiClient.delete(`/jobs/${jobId}`);
+}
+
 // Send a cold-outreach email for a posting via the Gmail API (backend OAuth).
 export async function sendOutreachEmail(
   jobId: string,

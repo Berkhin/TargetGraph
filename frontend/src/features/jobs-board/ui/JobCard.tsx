@@ -1,4 +1,5 @@
-import { ExternalLink, FileText } from "lucide-react";
+import { useState } from "react";
+import { ExternalLink, FileText, Trash2 } from "lucide-react";
 import {
   Card,
   CardAction,
@@ -20,6 +21,7 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import type { JobRead, JobStatus } from "@/features/jobs-board/api/types";
+import { useDeleteJob } from "@/features/jobs-board/hooks/useDeleteJob";
 import { useMatchJobStream } from "@/features/jobs-board/hooks/useMatchJobStream";
 import { StreamTerminal } from "@/features/jobs-board/ui/StreamTerminal";
 
@@ -32,6 +34,7 @@ const STATUS_VARIANT: Record<
   MATCHED: "secondary",
   REJECTED_BY_AI: "destructive",
   FILTERED_OUT: "outline",
+  DISCARDED: "outline",
 };
 
 const STATUS_LABEL: Record<JobStatus, string> = {
@@ -39,6 +42,7 @@ const STATUS_LABEL: Record<JobStatus, string> = {
   MATCHED: "MATCHED",
   REJECTED_BY_AI: "REJECTED",
   FILTERED_OUT: "FILTERED",
+  DISCARDED: "DISCARDED",
 };
 
 export type JobCardProps = {
@@ -54,6 +58,11 @@ export type JobCardProps = {
 export function JobCard({ job, profileId, location }: JobCardProps) {
   const { phase, isGenerating, streamLogs, startGeneration } =
     useMatchJobStream();
+
+  // Soft-delete with a confirm dialog so a generated card can be cleared off the
+  // board without being re-ingested by the next sourcing run.
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const deleteJob = useDeleteJob(job.id);
 
   const displayLocation = location ?? job.location;
 
@@ -120,6 +129,17 @@ export function JobCard({ job, profileId, location }: JobCardProps) {
           <Badge variant={STATUS_VARIANT[job.status]}>
             {STATUS_LABEL[job.status]}
           </Badge>
+
+          {/* Soft-delete this posting. Opens a confirm dialog before removing. */}
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label="Удалить карточку"
+            disabled={deleteJob.isPending}
+            onClick={() => setDeleteOpen(true)}
+          >
+            <Trash2 />
+          </Button>
         </CardAction>
       </CardHeader>
 
@@ -160,6 +180,40 @@ export function JobCard({ job, profileId, location }: JobCardProps) {
           {buttonLabel}
         </Button>
       </CardFooter>
+
+      {/* Delete confirmation — soft-delete removes the card from the board. */}
+      <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Удалить карточку?</DialogTitle>
+            <DialogDescription>
+              «{job.job_title} — {job.company_name}» исчезнет с доски. Это
+              действие нельзя отменить из интерфейса.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setDeleteOpen(false)}
+              disabled={deleteJob.isPending}
+            >
+              Отмена
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={deleteJob.isPending}
+              onClick={() =>
+                deleteJob.mutate(undefined, {
+                  onSuccess: () => setDeleteOpen(false),
+                })
+              }
+            >
+              <Trash2 />
+              {deleteJob.isPending ? "Удаление..." : "Удалить"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Card>
   );
 }

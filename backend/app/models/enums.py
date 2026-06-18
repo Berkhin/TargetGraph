@@ -19,3 +19,7 @@ class JobStatus(str, enum.Enum):
     # Kept out of the board and never re-scraped, but persisted so the dedup
     # check (source_job_id) still recognises it on later sourcing runs.
     FILTERED_OUT = "FILTERED_OUT"
+    # Removed by the user via the card's "delete" action. Like FILTERED_OUT it
+    # is hidden from every board (get_by_status filters on exact status) yet kept
+    # in the table so the sourcing dedup (source_job_id) does not re-ingest it.
+    DISCARDED = "DISCARDED"

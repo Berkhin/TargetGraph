@@ -88,6 +88,21 @@ async def update_job_status_and_score(
     return job
 
 
+@router.delete("/{job_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_job(
+    job_id: uuid.UUID,
+    repo: JobRepository = Depends(get_job_repository),
+) -> None:
+    """Soft-delete a posting (mark it ``DISCARDED``).
+
+    The card disappears from every board, but the row is kept so the sourcing
+    dedup never re-ingests it. Returns 204 on success, 404 if unknown.
+    """
+    deleted = await repo.soft_delete(job_id)
+    if deleted is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="job posting not found")
+
+
 @router.post("/{job_id}/match", response_model=JobMatchResponse)
 async def match_job(
     job_id: uuid.UUID,
@@ -203,6 +218,11 @@ async def send_outreach_email(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Outreach email could not be sent (mail service unavailable).",
         )
+
+    # Mark the posting as applied only after the email actually went out (any
+    # Gmail failure above already returned via HTTPException). This stamps
+    # applied_at so the card shows a "Подано · date" marker on the next refetch.
+    await repo.mark_applied(job_id)
 
     return OutreachSendResponse(
         status="sent",

@@ -3,7 +3,13 @@
 // Project convention: `type` only — no `interface`, no `any`.
 
 // Mirrors app.models.enums.JobStatus.
-export type JobStatus = "NEW" | "MATCHED" | "REJECTED_BY_AI" | "FILTERED_OUT";
+export type JobStatus =
+  | "NEW"
+  | "MATCHED"
+  | "REJECTED_BY_AI"
+  | "FILTERED_OUT"
+  // Soft-deleted by the user; hidden from every board, kept for sourcing dedup.
+  | "DISCARDED";
 
 // GET /api/v1/jobs — mirrors JobRead.
 // UUIDs and datetimes arrive as ISO strings over the wire.
@@ -27,6 +33,8 @@ export type Job = {
   // Cold-outreach contact resolved during matching (Hunter.io); null if none.
   recruiter_name: string | null;
   recruiter_email: string | null;
+  // ISO timestamp of a successful recruiter outreach send; null until applied.
+  applied_at: string | null;
   created_at: string;
   updated_at: string;
 };
