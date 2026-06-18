@@ -51,11 +51,12 @@ from app.utils.formatters import format_profile_to_markdown
 
 logger = get_logger(__name__)
 
-# Minimum pre-screen score (0-100) for a sourced posting to reach the board as
-# ``NEW``. Below this it is stored ``FILTERED_OUT`` so the UI hides it and the
-# matching pipeline never spends LLM calls on it. Kept in line with the matching
-# pipeline's MATCHED threshold (70) so the board only shows jobs that could match.
-_PRESCREEN_THRESHOLD = 70
+# Minimum pre-screen RELEVANCE score (0-100) for a sourced posting to reach the
+# board as ``NEW``. Below this it is stored ``FILTERED_OUT`` so the UI hides it.
+# Intentionally LOWER than the match pipeline's MATCHED threshold: the pre-screen
+# is a coarse relevance gate (drop only clearly off-target postings), while the
+# stricter qualification verdict happens later in the match pipeline, on click.
+_PRESCREEN_THRESHOLD = 55
 
 
 def _resolve_location(

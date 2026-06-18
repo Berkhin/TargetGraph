@@ -217,6 +217,61 @@ async def test_high_score_streams_and_persists_match(factory, patch_graph) -> No
     assert saved.tailored_cv_draft == "# Ada Lovelace\n- Built async APIs"
 
 
+async def test_matched_but_generation_failed_is_not_persisted(factory, patch_graph) -> None:
+    # Score clears the threshold, but the cover letter could not be generated
+    # (drafting_failed). The service must NOT persist a broken MATCHED: the job
+    # stays NEW (retryable) and the client gets an error frame, not a "done".
+    job_id, profile_id = await _seed(factory)
+    patch_graph(
+        [
+            {"event": "on_chain_start", "name": "LangGraph", "data": {}},
+            _node_end("extract_requirements", {"extracted_requirements": "..."}),
+            _node_end("match_profile", {"match_score": 80, "match_reasoning": "ok"}),
+            _node_end("generate_cover_letter", {"drafting_failed": True}),
+            _node_end("generate_tailored_cv", {"tailored_cv": None}),
+            _node_end("reviewer", {"review_comments": []}),
+        ]
+    )
+    ws = _FakeWebSocket()
+
+    await run_pipeline_stream(job_id, profile_id, ws, session_factory=factory)
+
+    assert ws.sent[-1]["step"] == "error"
+    assert ws.closed is True
+
+    saved = await _get_job(factory, job_id)
+    assert saved is not None
+    assert saved.status is JobStatus.NEW  # not a broken MATCHED
+    assert saved.match_score is None
+    assert saved.cover_letter_draft is None
+
+
+async def test_analysis_failure_is_not_persisted(factory, patch_graph) -> None:
+    # extract/match failed on an LLM/quota error (analysis_failed). The service
+    # must NOT persist a false REJECTED: the job stays NEW and the client gets an
+    # error frame.
+    job_id, profile_id = await _seed(factory)
+    patch_graph(
+        [
+            {"event": "on_chain_start", "name": "LangGraph", "data": {}},
+            _node_end(
+                "extract_requirements",
+                {"extracted_requirements": "...", "analysis_failed": True},
+            ),
+            _node_end("match_profile", {"match_score": 0, "match_reasoning": "err"}),
+        ]
+    )
+    ws = _FakeWebSocket()
+
+    await run_pipeline_stream(job_id, profile_id, ws, session_factory=factory)
+
+    assert ws.sent[-1]["step"] == "error"
+    saved = await _get_job(factory, job_id)
+    assert saved is not None
+    assert saved.status is JobStatus.NEW  # not a false REJECTED
+    assert saved.match_score is None
+
+
 async def test_low_score_sends_rejection_reason(factory, patch_graph) -> None:
     job_id, profile_id = await _seed(factory)
     patch_graph(_graph_events(score=30, reason="Missing core hard skills"))

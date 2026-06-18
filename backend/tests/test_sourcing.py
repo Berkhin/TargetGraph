@@ -171,6 +171,36 @@ def test_to_job_create_maps_apify_keys() -> None:
     assert job.source_url == "https://www.linkedin.com/jobs/view/abc"
 
 
+def test_to_job_create_maps_current_actor_schema() -> None:
+    # The live curious_coder build emits id/title/companyName/link/descriptionText
+    # instead of the legacy job_id/job_title/company/job_url/description keys. We
+    # must read the new names or every posting gets dropped (missing_job_id).
+    job = _to_job_create(
+        {
+            "id": "4408666528",
+            "title": "Senior Software Engineer",
+            "companyName": "Native",
+            "link": "https://il.linkedin.com/jobs/view/senior-software-engineer-4408666528",
+            "descriptionText": "The Role\n\nAs a Software Engineer...",
+            "descriptionHtml": "<strong>The Role</strong>...",
+            "location": "Tel Aviv-Yafo, Israel",
+            "employmentType": "Full-time",
+            "seniorityLevel": "Not Applicable",
+            "salary": "",
+        }
+    )
+    assert isinstance(job, JobCreate)
+    assert job.source_job_id == "4408666528"
+    assert job.job_title == "Senior Software Engineer"
+    assert job.company_name == "Native"
+    # Plain-text description is preferred over the HTML variant.
+    assert job.description == "The Role\n\nAs a Software Engineer..."
+    assert job.source_url.endswith("4408666528")
+    assert job.location == "Tel Aviv-Yafo, Israel"
+    assert job.employment_type == "Full-time"
+    assert job.salary is None  # empty string coerced to None
+
+
 def test_to_job_create_coerces_numeric_job_id_and_falls_back_to_synthetic_url() -> None:
     # LinkedIn job ids arrive as numbers; they must coerce to str cleanly, and a
     # missing job_url falls back to a synthetic, dedup-stable URL.
