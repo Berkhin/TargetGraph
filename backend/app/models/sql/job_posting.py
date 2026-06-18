@@ -30,6 +30,15 @@ class JobPosting(Base):
     description: Mapped[str] = mapped_column(Text)
     source_url: Mapped[str] = mapped_column(String(2048))
 
+    # Stable, opaque provider id (e.g. SerpAPI's google_jobs ``job_id``) used to
+    # deduplicate sourced postings. Nullable so manually-created rows (API / test
+    # script) remain valid; unique + indexed so dedup lookups are cheap and a
+    # concurrent insert of the same id fails with an IntegrityError the task
+    # handles per-row.
+    source_job_id: Mapped[str | None] = mapped_column(
+        String(512), nullable=True, unique=True, index=True
+    )
+
     # AI relevance score (0-100); null until the matching node has run.
     match_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
 

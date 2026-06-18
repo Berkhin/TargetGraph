@@ -124,3 +124,17 @@ async def test_update_missing_returns_none(session: AsyncSession) -> None:
 async def test_score_validation_rejects_out_of_range() -> None:
     with pytest.raises(ValueError):
         JobUpdate(match_score=150)
+
+
+async def test_get_by_source_job_id_found_and_missing(session: AsyncSession) -> None:
+    repo = JobRepository(session)
+    job = _new_job()
+    job.source_job_id = "serpapi-abc123"
+    created = await repo.create(job)
+
+    found = await repo.get_by_source_job_id("serpapi-abc123")
+    assert found is not None
+    assert found.id == created.id
+    assert found.source_job_id == "serpapi-abc123"
+
+    assert await repo.get_by_source_job_id("does-not-exist") is None

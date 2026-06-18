@@ -126,6 +126,27 @@ async def test_lazy_relationship_access_raises(session: AsyncSession) -> None:
         _ = entity.skills
 
 
+async def test_get_all_profiles_returns_all_with_children(
+    session: AsyncSession,
+) -> None:
+    repo = ProfileRepository(session)
+    await repo.create_full_profile(_new_profile(name="Alice"))
+    await repo.create_full_profile(_new_profile(name="Bob"))
+
+    profiles = await repo.get_all_profiles()
+    assert {p.candidate_name for p in profiles} == {"Alice", "Bob"}
+    # Children are eagerly loaded (no lazy='raise' surprises for the task).
+    for profile in profiles:
+        assert len(profile.experiences) == 2
+        assert len(profile.skills) == 2
+        assert profile.preferences["location"] == "Tel Aviv"
+
+
+async def test_get_all_profiles_empty(session: AsyncSession) -> None:
+    repo = ProfileRepository(session)
+    assert await repo.get_all_profiles() == []
+
+
 async def test_empty_children_default_to_lists(session: AsyncSession) -> None:
     repo = ProfileRepository(session)
     created = await repo.create_full_profile(
