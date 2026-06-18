@@ -97,7 +97,66 @@ async def test_send_outreach_success(session: AsyncSession) -> None:
         "message_id": "abc-789",
         "to_email": "recruiter@acme.com",
     }
-    assert gmail.calls == [("recruiter@acme.com", "Hello", "Dear Michal, ...")]
+    # The recipient/subject pass through unchanged; the body is the operator's
+    # text with the engineering-disclaimer postscript appended (see dedicated test).
+    to_email, subject, body = gmail.calls[0]
+    assert (to_email, subject) == ("recruiter@acme.com", "Hello")
+    assert body.startswith("Dear Michal, ...")
+    assert "🚀 Engineering Disclaimer:" in body
+
+
+@pytest.mark.asyncio
+async def test_send_outreach_appends_engineering_disclaimer(
+    session: AsyncSession,
+) -> None:
+    job_id = await _make_job(session)
+    gmail = _FakeGmailClient()
+    client = _wire(session, gmail)
+    try:
+        async with client:
+            resp = await client.post(
+                f"/api/v1/jobs/{job_id}/outreach/send",
+                json={
+                    "to_email": "recruiter@acme.com",
+                    "subject": "Hello",
+                    "body": "Dear Michal, ...",
+                },
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    body = gmail.calls[0][2]
+    # The full disclaimer block is present, including the source-code link.
+    assert "🚀 Engineering Disclaimer:" in body
+    assert "custom AI orchestration agent I engineered from scratch" in body
+    assert "https://github.com/Berkhin/TargetGraph" in body
+
+
+@pytest.mark.asyncio
+async def test_send_outreach_disclaimer_is_idempotent(session: AsyncSession) -> None:
+    """A body that already carries the disclaimer is sent without doubling it."""
+    job_id = await _make_job(session)
+    gmail = _FakeGmailClient()
+    client = _wire(session, gmail)
+    pre_composed = "Dear Michal, ...\n\n🚀 Engineering Disclaimer:\nalready here."
+    try:
+        async with client:
+            resp = await client.post(
+                f"/api/v1/jobs/{job_id}/outreach/send",
+                json={
+                    "to_email": "recruiter@acme.com",
+                    "subject": "Hello",
+                    "body": pre_composed,
+                },
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    body = gmail.calls[0][2]
+    assert body == pre_composed
+    assert body.count("🚀 Engineering Disclaimer:") == 1
 
 
 @pytest.mark.asyncio

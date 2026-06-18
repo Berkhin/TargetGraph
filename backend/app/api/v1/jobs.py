@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, status
 from googleapiclient.errors import HttpError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_outreach_settings
 from app.core.logging import get_logger
 from app.db.database import get_session
 from app.models.enums import JobStatus
@@ -22,6 +23,7 @@ from app.models.schemas.job import JobCreate, JobMatchResponse, JobRead, JobUpda
 from app.models.schemas.outreach import OutreachSendRequest, OutreachSendResponse
 from app.repositories.job_repository import JobRepository
 from app.services.gmail_client import GmailClient, get_gmail_client
+from app.services.outreach import append_engineering_disclaimer
 from app.services.orchestrator import (
     _DEFAULT_SCORE_THRESHOLD,
     JobNotFoundError,
@@ -206,11 +208,18 @@ async def send_outreach_email(
                 detail="attachment_content_base64 is not valid base64.",
             )
 
+    # Append the engineering-disclaimer postscript to every recruiter email. Done
+    # here (the single send seam) so the disclaimer is guaranteed regardless of the
+    # body the client sent; the helper is idempotent, so a re-send never doubles it.
+    body_text = append_engineering_disclaimer(
+        payload.body, github_url=get_outreach_settings().github_url
+    )
+
     try:
         result = await gmail.send_email(
             to_email=str(payload.to_email),
             subject=payload.subject,
-            body_text=payload.body,
+            body_text=body_text,
             attachment_filename=payload.attachment_filename,
             attachment_bytes=attachment_bytes,
         )
