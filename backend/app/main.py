@@ -26,29 +26,32 @@ logger = get_logger(__name__)
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Configure logging and the background sourcing scheduler on start-up.
 
-    The scheduler runs the periodic Apify LinkedIn-Jobs sourcing task on an
-    interval. ``get_sourcing_settings()`` is resolved here so a missing
-    ``APIFY_TOKEN`` fails fast at start-up rather than on every (silently
-    failing) scheduled run.
+    The scheduler runs the periodic Apify LinkedIn-Jobs sourcing task daily at
+    03:00 UTC (cron trigger). ``get_sourcing_settings()`` is resolved here so a
+    missing ``APIFY_TOKEN`` fails fast at start-up rather than on every
+    (silently failing) scheduled run.
     """
     configure_logging(logging.INFO)
     logger.info("application_startup")
 
-    sourcing_settings = get_sourcing_settings()
+    get_sourcing_settings()  # fail fast on a missing APIFY_TOKEN at start-up
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         run_sourcing_job,
-        trigger="interval",
-        hours=sourcing_settings.interval_hours,
+        trigger="cron",
+        hour=3,
+        minute=0,
+        timezone="UTC",  # fixed wall-clock 03:00 UTC, independent of host TZ
         id="sourcing",
         max_instances=1,  # never overlap a long run with the next tick
         coalesce=True,  # collapse missed runs into a single catch-up
+        misfire_grace_time=3600,  # still run if the loop was busy/asleep at 03:00
     )
     scheduler.start()
     app.state.scheduler = scheduler
     logger.info(
         "scheduler_started",
-        extra={"interval_hours": sourcing_settings.interval_hours},
+        extra={"schedule": "cron daily 03:00 UTC"},
     )
 
     try:
