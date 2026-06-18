@@ -21,7 +21,8 @@ dependencies = [
     # 2.x targets langchain-core 0.3.x, staying compatible with the langgraph<0.3 pin.
     "langchain-google-genai>=2.0,<3.0",  # official Gemini chat integration (ChatGoogleGenerativeAI)
     # Sourcing & Scheduling
-    "httpx>=0.27",            # async HTTP client for the SerpAPI (Google Jobs) integration
+    "apify-client>=3.0,<4",   # async Apify API client (ApifyClientAsync) for LinkedIn Jobs sourcing
+    "httpx>=0.27",            # async HTTP client (FastAPI test transport, ad-hoc scripts)
     "apscheduler>=3.10,<4",   # AsyncIOScheduler driving the periodic sourcing job
 ]
 

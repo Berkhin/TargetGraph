@@ -25,6 +25,13 @@ class JobBase(BaseModel):
     description: str = Field(min_length=1)
     source_url: str = Field(min_length=1, max_length=2048)
 
+    # Rich metadata from the LinkedIn jobs scraper. All optional — older rows and
+    # sparse scraper results may omit any of them.
+    location: str | None = Field(default=None, max_length=255)
+    employment_type: str | None = Field(default=None, max_length=100)
+    seniority_level: str | None = Field(default=None, max_length=100)
+    salary: str | None = Field(default=None, max_length=255)
+
 
 class JobCreate(JobBase):
     """Input DTO for creating a posting (status defaults to NEW)."""
@@ -49,6 +56,10 @@ class JobUpdate(BaseModel):
     status: JobStatus | None = None
     match_score: int | None = Field(default=None, ge=0, le=100)
     cover_letter_draft: str | None = None
+    location: str | None = Field(default=None, max_length=255)
+    employment_type: str | None = Field(default=None, max_length=100)
+    seniority_level: str | None = Field(default=None, max_length=100)
+    salary: str | None = Field(default=None, max_length=255)
 
 
 class JobRead(JobBase):

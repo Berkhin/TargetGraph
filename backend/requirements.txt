@@ -12,6 +12,7 @@ aiosmtplib>=3.0
 python-socks>=2.4
 langgraph>=0.2,<0.3
 langchain-google-genai>=2.0,<3.0
-# Sourcing (Google Jobs via SerpAPI) + background scheduler
-httpx>=0.27               # async HTTP client for SerpAPI calls
+# Sourcing (LinkedIn Jobs via Apify) + background scheduler
+apify-client>=3.0,<4      # async Apify API client (ApifyClientAsync); only way we talk to Apify
+httpx>=0.27               # async HTTP client (FastAPI test transport, ad-hoc scripts)
 apscheduler>=3.10,<4      # AsyncIOScheduler for the periodic sourcing job

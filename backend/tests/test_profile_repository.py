@@ -147,6 +147,28 @@ async def test_get_all_profiles_empty(session: AsyncSession) -> None:
     assert await repo.get_all_profiles() == []
 
 
+async def test_get_first_profile_empty_returns_none(session: AsyncSession) -> None:
+    repo = ProfileRepository(session)
+    assert await repo.get_first_profile() is None
+
+
+async def test_get_first_profile_is_deterministic_with_children(
+    session: AsyncSession,
+) -> None:
+    repo = ProfileRepository(session)
+    await repo.create_full_profile(_new_profile(name="Alice"))
+    await repo.create_full_profile(_new_profile(name="Bob"))
+
+    first = await repo.get_first_profile()
+    assert first is not None
+    # Stable across calls (ordered by id), and children are eagerly loaded.
+    again = await repo.get_first_profile()
+    assert again is not None
+    assert first.id == again.id
+    assert len(first.experiences) == 2
+    assert len(first.skills) == 2
+
+
 async def test_empty_children_default_to_lists(session: AsyncSession) -> None:
     repo = ProfileRepository(session)
     created = await repo.create_full_profile(

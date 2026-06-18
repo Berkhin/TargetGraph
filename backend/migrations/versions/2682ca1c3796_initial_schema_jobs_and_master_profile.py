@@ -29,8 +29,11 @@ def upgrade() -> None:
     sa.Column('source_url', sa.String(length=2048), nullable=False),
     sa.Column('match_score', sa.Integer(), nullable=True),
     sa.Column('status', sa.Enum('NEW', 'MATCHED', 'REJECTED_BY_AI', name='job_status'), server_default='NEW', nullable=False),
-    sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
-    sa.Column('updated_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
+    # ``sa.func.now()`` compiles per-dialect (CURRENT_TIMESTAMP on SQLite,
+    # now() on PostgreSQL). A literal ``sa.text('now()')`` would emit Postgres-
+    # only SQL and break inserts on the SQLite dev database.
+    sa.Column('created_at', sa.DateTime(), server_default=sa.func.now(), nullable=False),
+    sa.Column('updated_at', sa.DateTime(), server_default=sa.func.now(), nullable=False),
     sa.PrimaryKeyConstraint('id', name=op.f('pk_job_postings'))
     )
     op.create_index(op.f('ix_job_postings_status'), 'job_postings', ['status'], unique=False)
