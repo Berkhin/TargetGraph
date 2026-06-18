@@ -46,3 +46,6 @@ pgdata/
 .vscode/
 .idea/
 *.swp
+# Local dev SQLite databases
+*.db
+*.sqlite3

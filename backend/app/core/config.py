@@ -11,6 +11,7 @@ unit-testable (you can inject a custom :class:`EmailVerificationSettings`).
 from __future__ import annotations
 
 from functools import lru_cache
+from urllib.parse import quote_plus
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -108,3 +109,47 @@ class EmailVerificationSettings(BaseSettings):
 def get_email_verification_settings() -> EmailVerificationSettings:
     """Return a process-wide cached settings instance."""
     return EmailVerificationSettings()
+
+
+class DatabaseSettings(BaseSettings):
+    """PostgreSQL / SQLAlchemy connection settings.
+
+    The async URL is assembled from the discrete ``POSTGRES_*`` variables that
+    already drive the Docker Compose Postgres service, with a single
+    ``DATABASE_URL`` escape hatch for environments that supply a full DSN.
+    """
+
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
+
+    postgres_user: str = Field(default="postgres", validation_alias="POSTGRES_USER")
+    postgres_password: str = Field(default="", validation_alias="POSTGRES_PASSWORD")
+    postgres_host: str = Field(default="localhost", validation_alias="POSTGRES_HOST")
+    postgres_port: int = Field(default=5432, validation_alias="POSTGRES_PORT")
+    postgres_db: str = Field(default="targetgraph", validation_alias="POSTGRES_DB")
+
+    # Full DSN override (e.g. postgresql+asyncpg://...). Empty => assemble below.
+    database_url: str = Field(default="", validation_alias="DATABASE_URL")
+
+    echo: bool = Field(default=False, validation_alias="DB_ECHO")
+    pool_size: int = Field(default=5, ge=1, validation_alias="DB_POOL_SIZE")
+    max_overflow: int = Field(default=10, ge=0, validation_alias="DB_MAX_OVERFLOW")
+
+    @property
+    def async_url(self) -> str:
+        """The SQLAlchemy async (asyncpg) connection URL."""
+        if self.database_url:
+            return self.database_url
+        user = quote_plus(self.postgres_user)
+        password = quote_plus(self.postgres_password)
+        return (
+            f"postgresql+asyncpg://{user}:{password}"
+            f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+        )
+
+
+@lru_cache
+def get_database_settings() -> DatabaseSettings:
+    """Return a process-wide cached database settings instance."""
+    return DatabaseSettings()

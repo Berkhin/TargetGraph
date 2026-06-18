@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator
 
 from fastapi import FastAPI
 
-from app.api.v1 import email_verification
+from app.api.v1 import email_verification, jobs
 from app.core.logging import configure_logging, get_logger
 
 logger = get_logger(__name__)
@@ -30,6 +30,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="TargetGraph.io API", version="0.1.0", lifespan=lifespan)
+app.include_router(jobs.router)
 app.include_router(email_verification.router)
 
 

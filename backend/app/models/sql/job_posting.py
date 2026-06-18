@@ -1,0 +1,59 @@
+"""``job_postings`` table — SQLAlchemy 2.0 declarative mapping.
+
+Strictly typed via ``Mapped[...]`` + ``mapped_column``. The Python annotations
+drive the column types (``uuid.UUID`` -> ``Uuid``, ``datetime`` -> ``DateTime``),
+so no legacy ``Column(String)`` declarations are used.
+"""
+
+from __future__ import annotations
+
+import datetime
+import uuid
+
+from sqlalchemy import Enum as SAEnum
+from sqlalchemy import Integer, String, Text, func
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.db.base import Base
+from app.models.enums import JobStatus
+
+
+class JobPosting(Base):
+    """A scraped/ingested job posting and its matching state."""
+
+    __tablename__ = "job_postings"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+
+    company_name: Mapped[str] = mapped_column(String(255))
+    job_title: Mapped[str] = mapped_column(String(255))
+    description: Mapped[str] = mapped_column(Text)
+    source_url: Mapped[str] = mapped_column(String(2048))
+
+    # AI relevance score (0-100); null until the matching node has run.
+    match_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    status: Mapped[JobStatus] = mapped_column(
+        SAEnum(JobStatus, name="job_status", native_enum=True),
+        default=JobStatus.NEW,
+        server_default=JobStatus.NEW.value,
+        index=True,  # get_by_status filters on this column
+    )
+
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        server_default=func.now()
+    )
+    # NOTE: ``onupdate`` is applied by SQLAlchemy when it emits an UPDATE
+    # (both ORM and Core), NOT by a database trigger. Since every write goes
+    # through the repository/ORM this is sufficient. If a future path issues
+    # raw SQL UPDATEs that bypass SQLAlchemy, add a DB-level trigger (or
+    # ``server_onupdate``) in a migration to keep this column accurate.
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        server_default=func.now(), onupdate=func.now()
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return (
+            f"JobPosting(id={self.id!r}, company={self.company_name!r}, "
+            f"status={self.status!r})"
+        )

@@ -5,8 +5,13 @@ description = "TargetGraph.io backend — autonomous job-application engine."
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",  # ASGI server
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
+    # Data Layer
+    "sqlalchemy[asyncio]>=2.0",  # 2.0 declarative + async ORM
+    "asyncpg>=0.29",             # async PostgreSQL driver
+    "alembic>=1.13",             # schema migrations
     # Email Discovery & Verification Engine
     "dnspython>=2.6",         # async MX resolution (dns.asyncresolver)
     "aiosmtplib>=3.0",        # async SMTP client with sock= injection
@@ -17,6 +22,7 @@ dependencies = [
 dev = [
     "pytest>=8.2",
     "pytest-asyncio>=0.23",
+    "aiosqlite>=0.20",        # in-memory async DB for repository tests
 ]
 
 [tool.pytest.ini_options]
