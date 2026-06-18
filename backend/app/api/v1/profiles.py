@@ -11,11 +11,13 @@ call (``POST /jobs/{id}/match?profile_id=...``) instead of hardcoding one.
 
 from __future__ import annotations
 
+import uuid
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import get_session
-from app.models.schemas.profile import ProfileRead
+from app.models.schemas.profile import ProfileRead, ProfileUpdate
 from app.repositories.profile_repository import ProfileRepository
 
 router = APIRouter(prefix="/api/v1/profiles", tags=["profiles"])
@@ -51,5 +53,24 @@ async def get_active_profile(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="no candidate profile exists",
+        )
+    return profile
+
+
+@router.put("/{profile_id}", response_model=ProfileRead)
+async def update_profile(
+    profile_id: uuid.UUID,
+    payload: ProfileUpdate,
+    repo: ProfileRepository = Depends(get_profile_repository),
+) -> ProfileRead:
+    """Replace a candidate profile (and its experiences/skills) wholesale.
+
+    Returns 404 when no profile exists for ``profile_id``.
+    """
+    profile = await repo.update_full_profile(profile_id, payload)
+    if profile is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"profile {profile_id} not found",
         )
     return profile

@@ -59,6 +59,21 @@ def _patch_settings(monkeypatch) -> None:
     monkeypatch.setattr(sourcing_task, "ApifyClientAsync", lambda token: object())
 
 
+@pytest.fixture(autouse=True)
+def _patch_prescreen(monkeypatch) -> None:
+    """Stub the LLM pre-screen so no Gemini call happens.
+
+    Default verdict is a high score, so postings land as NEW — the assumption the
+    pre-existing persistence/dedup/budget tests are written against. Tests that
+    care about the filter override this with their own monkeypatch.
+    """
+
+    async def fake_relevance(job_description, profile_data):
+        return {"score": 95, "reason": "strong fit"}
+
+    monkeypatch.setattr(sourcing_task, "evaluate_job_relevance", fake_relevance)
+
+
 async def _seed_profile(
     factory: async_sessionmaker[AsyncSession],
     *,
@@ -91,6 +106,11 @@ def _raw(job_id: str, title: str = "AI Engineer") -> dict:
 async def _statuses(factory: async_sessionmaker[AsyncSession]) -> list:
     async with factory() as session:
         return await JobRepository(session).get_by_status(JobStatus.NEW)
+
+
+async def _filtered(factory: async_sessionmaker[AsyncSession]) -> list:
+    async with factory() as session:
+        return await JobRepository(session).get_by_status(JobStatus.FILTERED_OUT)
 
 
 async def test_persists_new_jobs_and_dedups_on_second_run(factory, monkeypatch) -> None:
@@ -247,3 +267,94 @@ async def test_no_profiles_is_a_noop(factory, monkeypatch) -> None:
 
     await run_sourcing_job(session_factory=factory)  # must not raise
     assert await _statuses(factory) == []
+
+
+async def test_low_score_is_filtered_out(factory, monkeypatch) -> None:
+    # Pre-screen returns below the threshold → the posting is persisted
+    # FILTERED_OUT (off the board) with its score and reason, not NEW.
+    await _seed_profile(factory, target_titles=["AI Engineer"])
+
+    async def fake_fetch(query, location, *, client=None):
+        return [_raw("low")]
+
+    async def fake_relevance(job_description, profile_data):
+        return {"score": 50, "reason": "missing core hard skills"}
+
+    monkeypatch.setattr(sourcing_task, "fetch_jobs_from_apify", fake_fetch)
+    monkeypatch.setattr(sourcing_task, "evaluate_job_relevance", fake_relevance)
+
+    await run_sourcing_job(session_factory=factory)
+
+    assert await _statuses(factory) == []  # nothing reached the board
+    filtered = await _filtered(factory)
+    assert len(filtered) == 1
+    assert filtered[0].source_job_id == "low"
+    assert filtered[0].match_score == 50
+    assert filtered[0].match_reason == "missing core hard skills"
+
+
+async def test_high_score_lands_new_with_score_and_reason(factory, monkeypatch) -> None:
+    await _seed_profile(factory, target_titles=["AI Engineer"])
+
+    async def fake_fetch(query, location, *, client=None):
+        return [_raw("hi")]
+
+    async def fake_relevance(job_description, profile_data):
+        return {"score": 88, "reason": "strong overlap"}
+
+    monkeypatch.setattr(sourcing_task, "fetch_jobs_from_apify", fake_fetch)
+    monkeypatch.setattr(sourcing_task, "evaluate_job_relevance", fake_relevance)
+
+    await run_sourcing_job(session_factory=factory)
+
+    new = await _statuses(factory)
+    assert len(new) == 1
+    assert new[0].status is JobStatus.NEW
+    assert new[0].match_score == 88
+    assert new[0].match_reason == "strong overlap"
+
+
+async def test_prescreen_unavailable_keeps_new(factory, monkeypatch) -> None:
+    # Fail-open: a None score (Gemini outage) must not drop the job — keep it NEW
+    # so the full pipeline can decide later.
+    await _seed_profile(factory, target_titles=["AI Engineer"])
+
+    async def fake_fetch(query, location, *, client=None):
+        return [_raw("unk")]
+
+    async def fake_relevance(job_description, profile_data):
+        return {"score": None, "reason": "Pre-screen unavailable."}
+
+    monkeypatch.setattr(sourcing_task, "fetch_jobs_from_apify", fake_fetch)
+    monkeypatch.setattr(sourcing_task, "evaluate_job_relevance", fake_relevance)
+
+    await run_sourcing_job(session_factory=factory)
+
+    new = await _statuses(factory)
+    assert len(new) == 1
+    assert new[0].status is JobStatus.NEW
+    assert new[0].match_score is None
+    assert await _filtered(factory) == []
+
+
+async def test_prescreen_skipped_for_duplicates(factory, monkeypatch) -> None:
+    # The pre-screen runs only for genuinely new postings: on a second run the
+    # known job is deduped before the (costly) LLM call.
+    await _seed_profile(factory, target_titles=["AI Engineer"])
+
+    async def fake_fetch(query, location, *, client=None):
+        return [_raw("dup")]
+
+    calls: list[str] = []
+
+    async def fake_relevance(job_description, profile_data):
+        calls.append(job_description)
+        return {"score": 95, "reason": "ok"}
+
+    monkeypatch.setattr(sourcing_task, "fetch_jobs_from_apify", fake_fetch)
+    monkeypatch.setattr(sourcing_task, "evaluate_job_relevance", fake_relevance)
+
+    await run_sourcing_job(session_factory=factory)
+    await run_sourcing_job(session_factory=factory)
+
+    assert len(calls) == 1  # second run deduped before the pre-screen

@@ -81,11 +81,15 @@ class JobRepository(BaseRepository):
         match_score: int,
         cover_letter_draft: str,
         status: JobStatus,
+        tailored_cv_draft: str | None = None,
     ) -> JobRead | None:
         """Save match results from the AI pipeline.
 
-        Updates the posting with the match score, cover letter draft, and status.
-        Returns ``None`` if the posting is absent.
+        Updates the posting with the match score, cover letter draft, tailored CV
+        draft, and status. ``tailored_cv_draft`` is optional so callers that do
+        not produce a CV (or where the CV node degraded to ``None``) leave the
+        column untouched-by-intent at ``None``. Returns ``None`` if the posting
+        is absent.
         """
         entity = await self._session.get(JobPosting, job_id)
         if entity is None:
@@ -93,6 +97,7 @@ class JobRepository(BaseRepository):
 
         entity.match_score = match_score
         entity.cover_letter_draft = cover_letter_draft
+        entity.tailored_cv_draft = tailored_cv_draft
         entity.status = status
 
         await self._session.flush()

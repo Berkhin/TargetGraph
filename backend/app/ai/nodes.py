@@ -1,13 +1,15 @@
 """Node functions and routing logic for the matching pipeline.
 
-``extract_requirements`` is wired to Gemini via the official
-``langchain-google-genai`` integration; the remaining nodes are still LLM-free
-stubs that log their name and return the partial state update LangGraph merges
-back — they exist to exercise the graph topology and the conditional revision
-loop until their real implementations land.
+Every node is wired to Gemini via the official ``langchain-google-genai``
+integration and uses ``with_structured_output`` for a guaranteed result shape:
+``extract_requirements`` → ``match_profile`` → the parallel pair
+``generate_cover_letter`` / ``generate_tailored_cv`` → ``reviewer`` (with the
+``should_revise`` revision loop). Each node takes the current :class:`GraphState`
+and returns a ``dict`` of the fields it wants LangGraph to merge back.
 
-Each node takes the current :class:`GraphState` and returns a ``dict`` of the
-fields it wants to update.
+This module also exposes :func:`evaluate_job_relevance`, a standalone cheap
+pre-screen used by the sourcing task *before* the graph runs — it is not a graph
+node, just a sibling that reuses the same LLM/chain machinery.
 """
 
 from __future__ import annotations
@@ -18,7 +20,12 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from app.ai.llm import get_llm
-from app.ai.state import ExtractedRequirements, GeneratedDocuments, GraphState
+from app.ai.state import (
+    ExtractedRequirements,
+    GeneratedDocuments,
+    GraphState,
+    TailoredCV,
+)
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -67,6 +74,26 @@ class ReviewResult(BaseModel):
     comments: list[str] = Field(
         default_factory=list,
         description="Specific hallucinations, fabrications, or stylistic issues (empty if approved).",
+    )
+
+
+class RelevanceResult(BaseModel):
+    """Structured output target for the cheap sourcing pre-screen.
+
+    Bound to the model via ``with_structured_output`` so Gemini returns a fit
+    score and a one-line reason directly. Deliberately lighter than
+    :class:`MatchResult` — it runs once per *newly sourced* posting before the
+    expensive matching pipeline, so it only needs a coarse keep/drop signal.
+    """
+
+    # No ge/le bound on purpose (same rationale as MatchResult.score): we clamp
+    # to [0, 100] after the call rather than risk a ValidationError turning a
+    # good match into a dropped row.
+    score: int = Field(
+        description="Overall fit, 0-100. Reserve 80+ for postings clearly worth applying to.",
+    )
+    reason: str = Field(
+        description="Brief justification (1-2 sentences) for the score.",
     )
 
 
@@ -148,6 +175,44 @@ _EXTRACT_SYSTEM_PROMPT = (
 )
 
 
+# System prompt for the cheap sourcing pre-screen. Mirrors the match node's
+# anti-inflation stance but compressed to a single keep/drop verdict: it runs
+# once per newly sourced posting, before the full pipeline, so a low score keeps
+# an off-target job off the board and out of the (re-)scraping path.
+_RELEVANCE_SYSTEM_PROMPT = (
+    "You are a Senior Technical Recruiter doing a fast first-pass screen of a "
+    "job posting against a candidate profile.\n"
+    "You are given the JOB DESCRIPTION and the candidate PROFILE.\n"
+    "Rules:\n"
+    "- Score 0-100 how well this candidate fits this specific job.\n"
+    "- Weight concrete technical (hard) skills far more heavily than soft "
+    "skills or generic responsibilities.\n"
+    "- Be strict: a related-but-different technology is NOT a match. Do not "
+    "inflate the score for adjacent skills.\n"
+    "- Reserve 80+ for postings the candidate is clearly qualified for and "
+    "should apply to.\n"
+    "- Give a 1-2 sentence reason naming the decisive factors."
+)
+
+
+# System prompt for the tailored-CV node. Like the drafting node it speaks for
+# the candidate and is forbidden from inventing experience; the difference is the
+# artefact — an ATS-optimised résumé in Markdown, with the existing experience
+# bullet points rewritten to surface the job's keywords.
+_TAILORED_CV_SYSTEM_PROMPT = (
+    "Ты ATS-оптимизатор. Возьми Master Profile кандидата и Job Description. "
+    "Перепиши bullet points опыта так, чтобы они максимально резонировали с "
+    "ключевыми словами вакансии, не выдумывая несуществующего опыта. Верни "
+    "Markdown.\n"
+    "Hard rules:\n"
+    "- NEVER invent experience, skills, employers, titles, or achievements that "
+    "are not stated in the PROFILE. Use only what the profile actually contains.\n"
+    "- Mirror the wording of the job's requirements where the profile genuinely "
+    "supports it, so an ATS keyword scan matches.\n"
+    "- Output valid Markdown only (headings, bullet lists); no commentary."
+)
+
+
 # System prompt for the review node. Strict fact-checking only: the model must
 # catch fabrications and unsupported claims grounded in the profile. Styling and
 # tone are outside scope — the loop should converge on facts, not synonyms.
@@ -214,6 +279,26 @@ def _get_review_chain():
     LLM must also call ``_get_review_chain.cache_clear()``.
     """
     return get_llm().with_structured_output(ReviewResult)
+
+
+@lru_cache(maxsize=1)
+def _get_relevance_chain():
+    """Return the cached structured-output chain for the sourcing pre-screen.
+
+    Same caching contract as :func:`_get_extraction_chain`: tests swapping the
+    LLM must also call ``_get_relevance_chain.cache_clear()``.
+    """
+    return get_llm().with_structured_output(RelevanceResult)
+
+
+@lru_cache(maxsize=1)
+def _get_tailored_cv_chain():
+    """Return the cached structured-output chain for tailored-CV generation.
+
+    Same caching contract as :func:`_get_extraction_chain`: tests swapping the
+    LLM must also call ``_get_tailored_cv_chain.cache_clear()``.
+    """
+    return get_llm().with_structured_output(TailoredCV)
 
 
 def _dedupe(items: list[str]) -> list[str]:
@@ -342,18 +427,18 @@ async def match_profile(state: GraphState) -> dict:
     }
 
 
-async def draft_documents(state: GraphState) -> dict:
-    """Draft the cover letter via Gemini (and bump the revision counter).
+async def generate_cover_letter(state: GraphState) -> dict:
+    """Draft the cover letter via Gemini.
 
     The model writes in the first person as the candidate, grounded strictly in
     ``profile_text`` and the requirements ``extract_requirements`` already
-    surfaced — the system prompt forbids inventing experience. The revision
-    counter is still incremented here so ``should_revise``'s cap keeps bounding
-    the draft/review loop. Any failure (API unavailable, invalid / empty model
-    response) is logged and degrades to a placeholder so the graph can still
-    route on to review and terminate.
+    surfaced — the system prompt forbids inventing experience. Runs in parallel
+    with :func:`generate_tailored_cv` after ``match_profile`` and is the node the
+    reviewer revision loop targets. Any failure (API unavailable, invalid /
+    empty model response) is logged and degrades to a placeholder so the graph
+    can still route on to review and terminate.
     """
-    logger.info("node", extra={"node": "draft_documents"})
+    logger.info("node", extra={"node": "generate_cover_letter"})
 
     # The placeholder every early/error path returns. The revision counter is
     # incremented only in the reviewer node (the loop's exit point), not here.
@@ -365,10 +450,10 @@ async def draft_documents(state: GraphState) -> dict:
     # no prompt rule stops the model inventing both, so we guard like the sibling
     # nodes do rather than spend an API call that can only hallucinate.
     if not state.profile_text or not state.profile_text.strip():
-        logger.warning("draft_documents.empty_profile_text")
+        logger.warning("generate_cover_letter.empty_profile_text")
         return _fallback()
     if not state.job_text or not state.job_text.strip():
-        logger.warning("draft_documents.empty_job_text")
+        logger.warning("generate_cover_letter.empty_job_text")
         return _fallback()
 
     # Hand the model the same three inputs the prompt promises: the vacancy, the
@@ -398,7 +483,7 @@ async def draft_documents(state: GraphState) -> dict:
             f"\n\nREVIEWER FEEDBACK (address every point):\n{feedback_block}"
         )
 
-    logger.info("draft_documents.prompt", extra={"chars": len(human_content)})
+    logger.info("generate_cover_letter.prompt", extra={"chars": len(human_content)})
 
     try:
         structured_llm = _get_draft_chain()
@@ -408,18 +493,74 @@ async def draft_documents(state: GraphState) -> dict:
         ]
         result: GeneratedDocuments | None = await structured_llm.ainvoke(messages)
     except Exception:  # noqa: BLE001 — node must never crash the graph
-        logger.exception("draft_documents.failed")
+        logger.exception("generate_cover_letter.failed")
         return _fallback()
 
     # Treat a missing or blank letter as a failure: structured output can return
     # an empty ``cover_letter`` that would otherwise be reported as success and
     # shown to the user as an empty draft.
     if result is None or not result.cover_letter.strip():
-        logger.warning("draft_documents.no_structured_output")
+        logger.warning("generate_cover_letter.no_structured_output")
         return _fallback()
 
-    logger.info("draft_documents.done")
+    logger.info("generate_cover_letter.done")
     return {"cover_letter_draft": result.cover_letter}
+
+
+async def generate_tailored_cv(state: GraphState) -> dict:
+    """Generate an ATS-optimised résumé via Gemini.
+
+    Runs in parallel with :func:`generate_cover_letter` after ``match_profile``.
+    The model rewrites the candidate's existing experience bullet points to
+    resonate with the job's keywords, grounded strictly in ``profile_text`` (the
+    prompt forbids inventing experience). Writes the disjoint ``tailored_cv``
+    state key so it never collides with the cover-letter node's concurrent
+    update. Any failure is logged and degrades to ``None`` so the graph still
+    terminates and the cover-letter branch is unaffected.
+    """
+    logger.info("node", extra={"node": "generate_tailored_cv"})
+
+    # Refuse to write without grounding — a résumé is pure fabrication without a
+    # profile, and untailorable without a job posting.
+    if not state.profile_text or not state.profile_text.strip():
+        logger.warning("generate_tailored_cv.empty_profile_text")
+        return {"tailored_cv": None}
+    if not state.job_text or not state.job_text.strip():
+        logger.warning("generate_tailored_cv.empty_job_text")
+        return {"tailored_cv": None}
+
+    reqs = state.extracted_requirements
+    requirement_lines = [
+        *(f"- [HARD] {s}" for s in reqs.hard_skills),
+        *(f"- [soft] {s}" for s in reqs.soft_skills),
+        *(f"- [resp] {s}" for s in reqs.core_responsibilities),
+    ]
+    requirements_block = "\n".join(requirement_lines) or "(none extracted)"
+    human_content = (
+        f"JOB POSTING:\n{state.job_text}\n\n"
+        f"EXTRACTED REQUIREMENTS:\n{requirements_block}\n\n"
+        f"CANDIDATE PROFILE (Master Profile):\n{state.profile_text}"
+    )
+
+    logger.info("generate_tailored_cv.prompt", extra={"chars": len(human_content)})
+
+    try:
+        structured_llm = _get_tailored_cv_chain()
+        messages = [
+            SystemMessage(content=_TAILORED_CV_SYSTEM_PROMPT),
+            HumanMessage(content=human_content),
+        ]
+        result: TailoredCV | None = await structured_llm.ainvoke(messages)
+    except Exception:  # noqa: BLE001 — node must never crash the graph
+        logger.exception("generate_tailored_cv.failed")
+        return {"tailored_cv": None}
+
+    if result is None or not result.tailored_cv.strip():
+        logger.warning("generate_tailored_cv.no_structured_output")
+        return {"tailored_cv": None}
+
+    logger.info("generate_tailored_cv.done")
+    return {"tailored_cv": result.tailored_cv}
 
 
 async def reviewer(state: GraphState) -> dict:
@@ -496,14 +637,73 @@ async def reviewer(state: GraphState) -> dict:
     }
 
 
+def should_draft(state: GraphState) -> list[str] | str:
+    """Gate drafting on the match score, right after ``match_profile``.
+
+    A job scoring below ``score_threshold`` will be rejected regardless of how
+    good its cover letter is, so there is no point spending LLM calls drafting
+    one. Below the threshold we route straight to the end; at/above it we fan out
+    to both drafting nodes in parallel (returning the two targets as a list is
+    how LangGraph triggers a parallel fan-out from a conditional edge).
+    """
+    if state.match_score < state.score_threshold:
+        logger.info(
+            "should_draft.skip",
+            extra={"score": state.match_score, "threshold": state.score_threshold},
+        )
+        return "__end__"
+    return ["generate_cover_letter", "generate_tailored_cv"]
+
+
 def should_revise(state: GraphState) -> str:
     """Decide whether to loop back for another draft or finish.
 
-    Loop back to ``draft_documents`` while there are outstanding review comments
-    (non-empty after stripping) and we are under the revision cap; otherwise
-    terminate the graph.
+    Loop back to ``generate_cover_letter`` while there are outstanding review
+    comments (non-empty after stripping) and we are under the revision cap;
+    otherwise terminate the graph. The CV branch is never revised — only the
+    cover letter is fact-checked by the reviewer.
     """
     meaningful_comments = [c for c in (state.review_comments or []) if c.strip()]
     if meaningful_comments and state.revision_number < 3:
-        return "draft_documents"
+        return "generate_cover_letter"
     return "__end__"
+
+
+async def evaluate_job_relevance(job_description: str, profile_data: str) -> dict:
+    """Cheap pre-screen of one posting against a profile, before the full pipeline.
+
+    Called by the sourcing task for each *newly sourced* posting (after dedup, so
+    it never re-scores known jobs). Returns ``{"score": int, "reason": str}`` for
+    a clear match/drop decision.
+
+    Fail-open: on any error, empty input, or missing structured output it returns
+    ``{"score": None, "reason": ...}``. The caller keeps such postings as ``NEW``
+    rather than dropping them, so a Gemini outage degrades to "let the full
+    pipeline decide later" instead of silently discarding every sourced job.
+    """
+    if not job_description or not job_description.strip():
+        return {"score": None, "reason": "Empty job description."}
+    if not profile_data or not profile_data.strip():
+        return {"score": None, "reason": "Empty profile."}
+
+    human_content = (
+        f"JOB DESCRIPTION:\n{job_description}\n\nPROFILE:\n{profile_data}"
+    )
+    try:
+        structured_llm = _get_relevance_chain()
+        messages = [
+            SystemMessage(content=_RELEVANCE_SYSTEM_PROMPT),
+            HumanMessage(content=human_content),
+        ]
+        result: RelevanceResult | None = await structured_llm.ainvoke(messages)
+    except Exception:  # noqa: BLE001 — pre-screen must never crash the sourcing task
+        logger.exception("evaluate_job_relevance.failed")
+        return {"score": None, "reason": "Pre-screen unavailable."}
+
+    if result is None:
+        logger.warning("evaluate_job_relevance.no_structured_output")
+        return {"score": None, "reason": "Pre-screen returned no structured output."}
+
+    # Clamp defensively (see RelevanceResult.score / MatchResult.score).
+    score = max(0, min(100, result.score))
+    return {"score": score, "reason": result.reason}

@@ -69,6 +69,24 @@ class ProfileCreate(BaseModel):
     skills: list[SkillCreate] = Field(default_factory=list)
 
 
+class ProfileUpdate(BaseModel):
+    """Input DTO for a full-aggregate replace of an existing profile.
+
+    Mirrors :class:`ProfileCreate`: a PUT replaces the whole profile, including
+    its nested experiences and skills (any incoming child has no id — the old
+    rows are deleted and these are inserted in their place, see
+    ``ProfileRepository.update_full_profile``).
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    candidate_name: str = Field(min_length=1, max_length=255)
+    target_titles: list[str] = Field(default_factory=list)
+    preferences: dict[str, Any] = Field(default_factory=dict)
+    experiences: list[ExperienceCreate] = Field(default_factory=list)
+    skills: list[SkillCreate] = Field(default_factory=list)
+
+
 class ProfileRead(BaseModel):
     """Output DTO — the full persisted profile with children."""
 

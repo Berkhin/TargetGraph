@@ -15,10 +15,11 @@ from app.models.schemas.profile import (
     ExperienceRead,
     ProfileCreate,
     ProfileRead,
+    ProfileUpdate,
     SkillCreate,
     SkillRead,
 )
-from app.models.sql.profile import MasterProfile, ProfileExperience
+from app.models.sql.profile import MasterProfile, ProfileExperience, ProfileSkill
 from app.repositories.profile_repository import ProfileRepository
 
 
@@ -178,3 +179,82 @@ async def test_empty_children_default_to_lists(session: AsyncSession) -> None:
     assert created.preferences == {}
     assert created.experiences == []
     assert created.skills == []
+
+
+async def test_update_full_profile_replaces_scalars_and_children(
+    session: AsyncSession,
+) -> None:
+    repo = ProfileRepository(session)
+    created = await repo.create_full_profile(_new_profile())
+    old_exp_ids = {e.id for e in created.experiences}
+
+    updated = await repo.update_full_profile(
+        created.id,
+        ProfileUpdate(
+            candidate_name="ADA LOVELACE",
+            target_titles=["Researcher"],
+            preferences={"location": "London"},
+            experiences=[
+                ExperienceCreate(
+                    company="Analytical Engine",
+                    role="Mathematician",
+                    start_date=datetime.date(1843, 1, 1),
+                    end_date=None,
+                    highlights=["first algorithm"],
+                )
+            ],
+            skills=[SkillCreate(category="Math", skills=["Algorithms"])],
+        ),
+    )
+
+    assert updated is not None
+    assert updated.id == created.id  # same aggregate, replaced in place
+    assert updated.candidate_name == "ADA LOVELACE"
+    assert updated.target_titles == ["Researcher"]
+    assert updated.preferences == {"location": "London"}
+
+    # Children fully replaced: one new experience/skill, none of the old ids.
+    assert len(updated.experiences) == 1
+    assert updated.experiences[0].company == "Analytical Engine"
+    assert len(updated.skills) == 1
+    assert updated.skills[0].category == "Math"
+    assert old_exp_ids.isdisjoint({e.id for e in updated.experiences})
+
+    # The old child rows are gone from the table, not just detached.
+    exp_rows = (
+        await session.scalars(
+            select(ProfileExperience).where(
+                ProfileExperience.profile_id == created.id
+            )
+        )
+    ).all()
+    assert {r.company for r in exp_rows} == {"Analytical Engine"}
+    skill_rows = (
+        await session.scalars(
+            select(ProfileSkill).where(ProfileSkill.profile_id == created.id)
+        )
+    ).all()
+    assert {r.category for r in skill_rows} == {"Math"}
+
+
+async def test_update_full_profile_can_clear_children(session: AsyncSession) -> None:
+    repo = ProfileRepository(session)
+    created = await repo.create_full_profile(_new_profile())
+
+    updated = await repo.update_full_profile(
+        created.id,
+        ProfileUpdate(candidate_name="Solo", target_titles=[], preferences={}),
+    )
+    assert updated is not None
+    assert updated.experiences == []
+    assert updated.skills == []
+
+
+async def test_update_full_profile_missing_returns_none(
+    session: AsyncSession,
+) -> None:
+    repo = ProfileRepository(session)
+    result = await repo.update_full_profile(
+        uuid.uuid4(), ProfileUpdate(candidate_name="Nobody")
+    )
+    assert result is None

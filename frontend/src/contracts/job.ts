@@ -3,7 +3,7 @@
 // Project convention: `type` only — no `interface`, no `any`.
 
 // Mirrors app.models.enums.JobStatus.
-export type JobStatus = "NEW" | "MATCHED" | "REJECTED_BY_AI";
+export type JobStatus = "NEW" | "MATCHED" | "REJECTED_BY_AI" | "FILTERED_OUT";
 
 // GET /api/v1/jobs — mirrors JobRead.
 // UUIDs and datetimes arrive as ISO strings over the wire.
@@ -15,7 +15,9 @@ export type Job = {
   source_url: string;
   status: JobStatus;
   match_score: number | null;
+  match_reason: string | null;
   cover_letter_draft: string | null;
+  tailored_cv_draft: string | null;
   source_job_id: string | null;
   // Rich metadata from the LinkedIn jobs scraper; any may be null.
   location: string | null;
