@@ -40,6 +40,21 @@ class ExtractedRequirements(BaseModel):
         return not (self.hard_skills or self.soft_skills or self.core_responsibilities)
 
 
+class GeneratedDocuments(BaseModel):
+    """Structured output target for the ``draft_documents`` node.
+
+    Bound to the model via ``with_structured_output`` so Gemini returns the
+    cover letter as a single field rather than free-form prose we would have to
+    parse out of a chat message. Kept as its own model (not just a bare ``str``)
+    so additional drafted artefacts (e.g. a tailored resume) can be added later
+    without changing the node's call signature.
+    """
+
+    cover_letter: str = Field(
+        description="The full cover letter text, ready to send (max 3 paragraphs).",
+    )
+
+
 class GraphState(BaseModel):
     """End-to-end state for the job/profile matching workflow."""
 

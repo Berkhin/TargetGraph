@@ -64,3 +64,27 @@ class JobRepository(BaseRepository):
         await self._session.flush()
         await self._session.refresh(entity)
         return JobRead.model_validate(entity)
+
+    async def save_match_results(
+        self,
+        job_id: uuid.UUID,
+        match_score: int,
+        cover_letter_draft: str,
+        status: JobStatus,
+    ) -> JobRead | None:
+        """Save match results from the AI pipeline.
+
+        Updates the posting with the match score, cover letter draft, and status.
+        Returns ``None`` if the posting is absent.
+        """
+        entity = await self._session.get(JobPosting, job_id)
+        if entity is None:
+            return None
+
+        entity.match_score = match_score
+        entity.cover_letter_draft = cover_letter_draft
+        entity.status = status
+
+        await self._session.flush()
+        await self._session.refresh(entity)
+        return JobRead.model_validate(entity)

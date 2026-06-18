@@ -31,19 +31,21 @@ class JobCreate(JobBase):
 
     status: JobStatus = JobStatus.NEW
     match_score: int | None = Field(default=None, ge=0, le=100)
+    cover_letter_draft: str | None = None
 
 
 class JobUpdate(BaseModel):
     """Partial-update DTO for the matching pipeline.
 
-    Only fields that are *explicitly set* are applied, so ``status`` and
-    ``match_score`` can be updated independently.
+    Only fields that are *explicitly set* are applied, so ``status``,
+    ``match_score``, and ``cover_letter_draft`` can be updated independently.
     """
 
     model_config = ConfigDict(from_attributes=True)
 
     status: JobStatus | None = None
     match_score: int | None = Field(default=None, ge=0, le=100)
+    cover_letter_draft: str | None = None
 
 
 class JobRead(JobBase):
@@ -52,5 +54,15 @@ class JobRead(JobBase):
     id: uuid.UUID
     status: JobStatus
     match_score: int | None
+    cover_letter_draft: str | None
     created_at: datetime.datetime
     updated_at: datetime.datetime
+
+
+class JobMatchResponse(JobRead):
+    """Response DTO for the AI matching pipeline.
+
+    Extends JobRead with the full matched job state after running the pipeline.
+    """
+
+    pass
