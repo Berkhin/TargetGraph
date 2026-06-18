@@ -20,3 +20,32 @@ export async function getNewJobs(): Promise<JobRead[]> {
 export async function getMatchedJobs(): Promise<JobRead[]> {
   return getJobsByStatus("MATCHED");
 }
+
+// Payload + result for POST /jobs/{id}/outreach/send (mirrors the backend
+// OutreachSendRequest / OutreachSendResponse).
+export type OutreachSendRequest = {
+  to_email: string;
+  subject: string;
+  body: string;
+  // Optional attachment (e.g. the tailored-CV PDF), base64-encoded bytes.
+  attachment_filename?: string | null;
+  attachment_content_base64?: string | null;
+};
+
+export type OutreachSendResponse = {
+  status: string;
+  message_id: string | null;
+  to_email: string;
+};
+
+// Send a cold-outreach email for a posting via the Gmail API (backend OAuth).
+export async function sendOutreachEmail(
+  jobId: string,
+  payload: OutreachSendRequest,
+): Promise<OutreachSendResponse> {
+  const { data } = await apiClient.post<OutreachSendResponse>(
+    `/jobs/${jobId}/outreach/send`,
+    payload,
+  );
+  return data;
+}

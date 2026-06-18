@@ -172,21 +172,31 @@ async def fetch_jobs_from_apify(
 def _to_job_create(raw: dict) -> JobCreate | None:
     """Map a raw Apify LinkedIn-Jobs item into a :class:`JobCreate`.
 
-    Returns ``None`` (logged) if the item lacks a ``job_id``, which is the stable
+    Field names are read with fallbacks because the curious_coder actor changed
+    its output schema across builds: the current build emits ``id`` / ``title`` /
+    ``companyName`` / ``link`` / ``descriptionText``, while older builds (and the
+    test fixtures) used ``job_id`` / ``job_title`` / ``company`` / ``job_url`` /
+    ``description``. We accept either so a build bump never silently drops every
+    posting.
+
+    Returns ``None`` (logged) if the item lacks any job id, which is the stable
     dedup key — without it we cannot safely deduplicate, so we skip it.
     """
-    job_id = raw.get("job_id")
+    job_id = raw.get("id") or raw.get("job_id")
     if not job_id:
         logger.warning(
             "sourcing_result_missing_job_id",
-            extra={"job_title": raw.get("job_title"), "company": raw.get("company")},
+            extra={
+                "job_title": raw.get("title") or raw.get("job_title"),
+                "company": raw.get("companyName") or raw.get("company"),
+            },
         )
         return None
 
     job_id = str(job_id)
-    # job_url should always be present, but the (min_length=1) DTO field must never
-    # be empty, so fall back to a synthetic, dedup-stable URL.
-    source_url = (raw.get("job_url") or f"apify://{job_id}")[:2048]
+    # The job URL should always be present, but the (min_length=1) DTO field must
+    # never be empty, so fall back to a synthetic, dedup-stable URL.
+    source_url = (raw.get("link") or raw.get("job_url") or f"apify://{job_id}")[:2048]
 
     # Rich, optional metadata from the LinkedIn jobs scraper. .get() returns None
     # when the key is absent, so a sparse item never raises here.
@@ -195,15 +205,24 @@ def _to_job_create(raw: dict) -> JobCreate | None:
     seniority_level = raw.get("seniorityLevel")
     salary_raw = raw.get("salary")
     salary = salary_raw if salary_raw else None  # guard against empty string ""
+    # The employer's own website — used downstream for an accurate Hunter.io
+    # recruiter lookup. Empty string guarded so we store NULL, not "".
+    company_website = raw.get("companyWebsite") or None
+
+    # Prefer the plain-text description (better for the LLM) over the HTML one.
+    description = (
+        raw.get("descriptionText") or raw.get("description") or _NO_DESCRIPTION
+    )
 
     return JobCreate(
-        company_name=(raw.get("company") or _UNKNOWN)[:255],
-        job_title=(raw.get("job_title") or _UNKNOWN)[:255],
-        description=raw.get("description") or _NO_DESCRIPTION,
+        company_name=(raw.get("companyName") or raw.get("company") or _UNKNOWN)[:255],
+        job_title=(raw.get("title") or raw.get("job_title") or _UNKNOWN)[:255],
+        description=description,
         source_url=source_url,
         source_job_id=job_id[:512],
         location=location[:255] if location else None,
         employment_type=employment_type[:100] if employment_type else None,
         seniority_level=seniority_level[:100] if seniority_level else None,
         salary=salary[:255] if salary else None,
+        company_website=company_website[:255] if company_website else None,
     )

@@ -24,6 +24,9 @@ export type Job = {
   employment_type: string | null;
   seniority_level: string | null;
   salary: string | null;
+  // Cold-outreach contact resolved during matching (Hunter.io); null if none.
+  recruiter_name: string | null;
+  recruiter_email: string | null;
   created_at: string;
   updated_at: string;
 };

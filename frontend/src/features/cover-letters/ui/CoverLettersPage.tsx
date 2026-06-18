@@ -1,6 +1,7 @@
 import { Skeleton } from "@/components/ui/skeleton";
 import { CoverLetterCard } from "@/features/cover-letters/ui/CoverLetterCard";
 import { useMatchedJobs } from "@/features/jobs-board/hooks/useMatchedJobs";
+import { useActiveProfile } from "@/features/profiles/hooks/useActiveProfile";
 import { getApiErrorMessage } from "@/shared/api/errors";
 
 function CoverLetterSkeleton() {
@@ -16,6 +17,9 @@ function CoverLetterSkeleton() {
 
 export function CoverLettersPage() {
   const { data: jobs, isPending, isError, error } = useMatchedJobs();
+  // Active profile drives the "Регенерировать" pipeline; until it loads (or if
+  // none exists) the regenerate button on each card stays disabled.
+  const { data: profile } = useActiveProfile();
 
   return (
     <main className="mx-auto px-4 py-10">
@@ -44,7 +48,11 @@ export function CoverLettersPage() {
             // Key on updated_at as well as id: the card seeds its editable
             // drafts from props via useState (read once at mount), so a re-match
             // that rewrites the drafts must remount the card to pick them up.
-            <CoverLetterCard key={`${job.id}:${job.updated_at}`} job={job} />
+            <CoverLetterCard
+              key={`${job.id}:${job.updated_at}`}
+              job={job}
+              profileId={profile?.id ?? null}
+            />
           ))}
         </div>
       )}

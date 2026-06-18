@@ -50,7 +50,7 @@ async def seed_db():
                 ExperienceCreate(
                     company="Independent Product Hypothesis Test", #[cite: 1]
                     role="Al-Driven Arbitrage & Smart-Search MVP", #[cite: 1]
-                    start_date=date(2024, 1, 1), #[cite: 1]
+                    start_date=date(2026, 1, 1), #[cite: 1]
                     end_date=None, # Present[cite: 1]
                     highlights=[
                         "Designed and launched a fully automated Telegram-based MVP to test the hypothesis that LLM orchestration can replace manual secondary market discovery.", #[cite: 1]

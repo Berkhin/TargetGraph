@@ -23,6 +23,11 @@ type StreamFrame =
     }
   | { step: "match_profile"; score: number | null; reason: string | null }
   | {
+      step: "find_recruiter_contact";
+      recruiter_name: string | null;
+      recruiter_email: string | null;
+    }
+  | {
       step: "done";
       status: "MATCHED" | "REJECTED_BY_AI";
       score: number;
@@ -55,6 +60,12 @@ function frameToLog(frame: StreamFrame): string | null {
       return `Оценка соответствия: ${frame.score ?? "—"}%${
         frame.reason ? ` — ${frame.reason}` : ""
       }`;
+    case "find_recruiter_contact":
+      return frame.recruiter_name
+        ? `Контакт найден: ${frame.recruiter_name}${
+            frame.recruiter_email ? ` <${frame.recruiter_email}>` : ""
+          }`
+        : "Контакт рекрутёра не найден — обращение к Hiring Team";
     case "generate_cover_letter":
       return "Генерация сопроводительного письма...";
     case "generate_tailored_cv":

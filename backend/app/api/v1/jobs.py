@@ -7,17 +7,23 @@ Demonstrates the access rule: endpoints depend on a :class:`JobRepository`
 
 from __future__ import annotations
 
+import base64
+import binascii
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, status
+from googleapiclient.errors import HttpError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
 from app.db.database import get_session
 from app.models.enums import JobStatus
 from app.models.schemas.job import JobCreate, JobMatchResponse, JobRead, JobUpdate
+from app.models.schemas.outreach import OutreachSendRequest, OutreachSendResponse
 from app.repositories.job_repository import JobRepository
+from app.services.gmail_client import GmailClient, get_gmail_client
 from app.services.orchestrator import (
+    _DEFAULT_SCORE_THRESHOLD,
     JobNotFoundError,
     ProfileNotFoundError,
     PipelineExecutionError,
@@ -120,15 +126,38 @@ async def match_job(
 
     # Save results at the end, after all checks pass
     match_score = pipeline_result.get("match_score", 0)
-    cover_letter = pipeline_result.get("cover_letter_draft", "")
+    cover_letter = pipeline_result.get("cover_letter_draft") or ""
     tailored_cv = pipeline_result.get("tailored_cv")
+    drafting_failed = bool(pipeline_result.get("drafting_failed"))
+    analysis_failed = bool(pipeline_result.get("analysis_failed"))
+
+    # Infra/quota failure during analysis or drafting: don't persist a false
+    # verdict (REJECTED) or a broken MATCHED — leave the job NEW and report the
+    # outage so the client can retry later.
+    if analysis_failed or (
+        match_score >= _DEFAULT_SCORE_THRESHOLD
+        and (drafting_failed or not cover_letter.strip())
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI evaluation/generation is unavailable (model quota). Try again later.",
+        )
+
     result_status = (
-        JobStatus.MATCHED if match_score >= 70 else JobStatus.REJECTED_BY_AI
+        JobStatus.MATCHED
+        if match_score >= _DEFAULT_SCORE_THRESHOLD
+        else JobStatus.REJECTED_BY_AI
     )
 
     repo = JobRepository(session)
     await repo.save_match_results(
-        job_id, match_score, cover_letter, result_status, tailored_cv
+        job_id,
+        match_score,
+        cover_letter,
+        result_status,
+        tailored_cv,
+        recruiter_name=pipeline_result.get("recruiter_name"),
+        recruiter_email=pipeline_result.get("recruiter_email"),
     )
 
     # Fetch the updated job and return it
@@ -140,6 +169,77 @@ async def match_job(
         )
 
     return JobMatchResponse.model_validate(job)
+
+
+@router.post("/{job_id}/outreach/send", response_model=OutreachSendResponse)
+async def send_outreach_email(
+    job_id: uuid.UUID,
+    payload: OutreachSendRequest,
+    repo: JobRepository = Depends(get_job_repository),
+    gmail: GmailClient = Depends(get_gmail_client),
+) -> OutreachSendResponse:
+    """Send a cold-outreach email for a posting via the Gmail API.
+
+    The ``job_id`` scopes the action to a real posting (404 if unknown). The body
+    carries the recipient, subject, and text — typically pre-filled from the
+    recruiter contact resolved during matching.
+
+    Raises:
+        404: If ``job_id`` does not exist.
+        500: If Gmail rejects the send or OAuth/credentials are unavailable.
+    """
+    job = await repo.get_by_id(job_id)
+    if job is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="job posting not found")
+
+    # Decode the optional attachment (e.g. the tailored-CV PDF) up front so a
+    # malformed payload is a clean 400, not a 500 from inside the Gmail call.
+    attachment_bytes: bytes | None = None
+    if payload.attachment_content_base64:
+        try:
+            attachment_bytes = base64.b64decode(
+                payload.attachment_content_base64, validate=True
+            )
+        except (binascii.Error, ValueError):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="attachment_content_base64 is not valid base64.",
+            )
+
+    try:
+        result = await gmail.send_email(
+            to_email=str(payload.to_email),
+            subject=payload.subject,
+            body_text=payload.body,
+            attachment_filename=payload.attachment_filename,
+            attachment_bytes=attachment_bytes,
+        )
+    except HttpError as exc:
+        # Gmail API-level failure (bad request, quota, auth scope, etc.).
+        logger.error(
+            "outreach_send_failed",
+            extra={"job_id": str(job_id), "status_code": exc.status_code},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to send the email via Gmail. Please try again later.",
+        )
+    except Exception:  # noqa: BLE001 — missing credentials / OAuth / refresh errors
+        # Not an HttpError (e.g. credentials.json missing, consent failed): still
+        # surface a clean 500 rather than leaking a stack trace to the client.
+        logger.exception(
+            "outreach_send_error", extra={"job_id": str(job_id)}
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Outreach email could not be sent (mail service unavailable).",
+        )
+
+    return OutreachSendResponse(
+        status="sent",
+        message_id=result.get("id"),
+        to_email=payload.to_email,
+    )
 
 
 @router.websocket("/{job_id}/ws-match")

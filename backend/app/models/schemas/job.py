@@ -31,6 +31,14 @@ class JobBase(BaseModel):
     employment_type: str | None = Field(default=None, max_length=100)
     seniority_level: str | None = Field(default=None, max_length=100)
     salary: str | None = Field(default=None, max_length=255)
+    # The employer's own website (Apify ``companyWebsite``); carries the real
+    # company domain used for the Hunter.io recruiter lookup. Inherited by
+    # JobCreate and JobRead.
+    company_website: str | None = Field(default=None, max_length=255)
+    # Cold-outreach contact resolved during matching (Hunter.io). Both inherited
+    # by JobCreate and JobRead; null until find_recruiter_contact resolves one.
+    recruiter_name: str | None = Field(default=None, max_length=255)
+    recruiter_email: str | None = Field(default=None, max_length=255)
 
 
 class JobCreate(JobBase):
@@ -64,6 +72,9 @@ class JobUpdate(BaseModel):
     employment_type: str | None = Field(default=None, max_length=100)
     seniority_level: str | None = Field(default=None, max_length=100)
     salary: str | None = Field(default=None, max_length=255)
+    company_website: str | None = Field(default=None, max_length=255)
+    recruiter_name: str | None = Field(default=None, max_length=255)
+    recruiter_email: str | None = Field(default=None, max_length=255)
 
 
 class JobRead(JobBase):

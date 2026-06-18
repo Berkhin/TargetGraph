@@ -211,17 +211,64 @@ class AISettings(BaseSettings):
         validation_alias="GEMINI_API_KEY",
         description="Google Gemini API key (Generative Language API).",
     )
+    # Two model tiers (kept separate so generation can be bumped to a pro model
+    # later via env, without touching analysis). Both default to the *lite* model:
+    # on the free tier flash-lite allows ~500 requests/day, vs only 20/day for
+    # gemini-3.5-flash and 0/day for the pro tier — so lite is the only id that is
+    # actually usable without billing. (1.5-family models remain forbidden.)
+    #   * flash tier — structured/analytical: extraction, matching, review, pre-screen.
+    #   * generation tier — cover letter + tailored CV.
     gemini_model: str = Field(
         default="gemini-3.1-flash-lite",
         validation_alias="GEMINI_MODEL",
-        description="Gemini model id used by ChatGoogleGenerativeAI.",
+        description="Analytical-tier model id for extraction, matching, review, pre-screen.",
+    )
+    # Defaults to flash-lite (free-tier-friendly). Set to a pro id
+    # (e.g. gemini-3.1-pro-preview) once billing is enabled for higher-quality prose.
+    gemini_generation_model: str = Field(
+        default="gemini-3.1-flash-lite",
+        validation_alias="GEMINI_GENERATION_MODEL",
+        description="Model id for cover-letter and tailored-CV generation.",
+    )
+    gemini_max_retries: int = Field(
+        default=2,
+        ge=0,
+        le=6,
+        validation_alias="GEMINI_MAX_RETRIES",
+        description="Max client retries on transient/quota errors; low so a hard "
+        "quota (limit=0) fails fast instead of backing off for minutes.",
+    )
+    # The reviewer fact-checks the cover letter and can trigger up to 3 redraft
+    # passes — i.e. several extra LLM calls per job. Off by default to conserve the
+    # tiny free-tier daily quota; enable it when quota (billing) is not a concern.
+    ai_enable_review: bool = Field(
+        default=False,
+        validation_alias="AI_ENABLE_REVIEW",
+        description="Run the reviewer + revision loop (extra LLM calls per job).",
     )
     gemini_temperature: float = Field(
         default=0.0,
         ge=0.0,
         le=2.0,
         validation_alias="GEMINI_TEMPERATURE",
-        description="Sampling temperature; 0.0 for deterministic extraction.",
+        description="Sampling temperature for analytical/structured nodes; 0.0 = deterministic.",
+    )
+    # Generation temperatures are split on purpose: the tailored CV must not
+    # hallucinate facts about the candidate's experience (low temp), while the
+    # cover letter benefits from a livelier, more natural voice (higher temp).
+    gemini_cover_letter_temperature: float = Field(
+        default=0.65,
+        ge=0.0,
+        le=2.0,
+        validation_alias="GEMINI_COVER_LETTER_TEMPERATURE",
+        description="Sampling temperature for cover-letter drafting (natural voice).",
+    )
+    gemini_tailored_cv_temperature: float = Field(
+        default=0.3,
+        ge=0.0,
+        le=2.0,
+        validation_alias="GEMINI_TAILORED_CV_TEMPERATURE",
+        description="Sampling temperature for tailored-CV drafting (factual, low-hallucination).",
     )
 
     @model_validator(mode="after")
@@ -348,6 +395,83 @@ class SourcingSettings(BaseSettings):
 def get_sourcing_settings() -> SourcingSettings:
     """Return a process-wide cached sourcing settings instance."""
     return SourcingSettings()
+
+
+class HunterSettings(BaseSettings):
+    """Settings for the Hunter.io email-discovery integration (cold outreach).
+
+    Drives :class:`app.services.hunter_client.HunterClient`, which finds the
+    email addresses of recruiters / hiring managers at a target company from its
+    domain. Unlike the AI and sourcing settings, the key is *not* validated at
+    load time: cold outreach is an optional pipeline stage, so a missing key
+    degrades to an empty contact list (logged) rather than failing start-up.
+    """
+
+    model_config = SettingsConfigDict(
+        env_file=_ENV_FILE, env_file_encoding="utf-8", extra="ignore"
+    )
+
+    hunter_api_key: str = Field(
+        default="",
+        validation_alias="HUNTER_API_KEY",
+        description="Hunter.io API key for the v2 domain-search endpoint.",
+    )
+
+
+@lru_cache
+def get_hunter_settings() -> HunterSettings:
+    """Return a process-wide cached Hunter settings instance."""
+    return HunterSettings()
+
+
+class GmailSettings(BaseSettings):
+    """Settings for cold-outreach email sending via the Gmail API (OAuth 2.0).
+
+    Drives :class:`app.services.gmail_client.GmailClient`. Two on-disk artefacts:
+    ``credentials.json`` (the OAuth *client secrets* downloaded from Google Cloud
+    for a Desktop App) and ``token.json`` (the user's authorised token, created on
+    the first consent and refreshed thereafter). Both are resolved relative to the
+    ``backend`` directory so they're found regardless of the process's CWD, and
+    both are git-ignored — they are secrets.
+    """
+
+    model_config = SettingsConfigDict(
+        env_file=_ENV_FILE, env_file_encoding="utf-8", extra="ignore"
+    )
+
+    gmail_credentials_file: str = Field(
+        default="credentials.json",
+        validation_alias="GMAIL_CREDENTIALS_FILE",
+        description="OAuth client-secrets file (Desktop App) from Google Cloud.",
+    )
+    gmail_token_file: str = Field(
+        default="token.json",
+        validation_alias="GMAIL_TOKEN_FILE",
+        description="Authorised-user token, created/refreshed by the OAuth flow.",
+    )
+
+    def _anchor(self, path: str) -> str:
+        """Resolve a possibly-relative path against the ``backend`` directory."""
+        candidate = Path(path)
+        if candidate.is_absolute():
+            return str(candidate)
+        return str((_BACKEND_DIR / candidate).resolve())
+
+    @property
+    def credentials_path(self) -> str:
+        """Absolute path to the OAuth client-secrets file."""
+        return self._anchor(self.gmail_credentials_file)
+
+    @property
+    def token_path(self) -> str:
+        """Absolute path to the authorised-user token file."""
+        return self._anchor(self.gmail_token_file)
+
+
+@lru_cache
+def get_gmail_settings() -> GmailSettings:
+    """Return a process-wide cached Gmail settings instance."""
+    return GmailSettings()
 
 
 class CORSSettings(BaseSettings):

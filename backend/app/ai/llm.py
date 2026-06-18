@@ -22,16 +22,26 @@ from app.core.config import get_ai_settings
 
 
 @lru_cache
-def get_llm() -> ChatGoogleGenerativeAI:
+def get_llm(
+    model: str | None = None, temperature: float | None = None
+) -> ChatGoogleGenerativeAI:
     """Return a process-wide cached Gemini chat client.
 
-    The API key is passed explicitly from :class:`~app.core.config.AISettings`
-    so the client does not silently depend on ambient ``GOOGLE_API_KEY`` /
-    ``GEMINI_API_KEY`` environment variables.
+    A separate client is cached per ``(model, temperature)`` pair so the pipeline
+    can mix tiers — a cheap flash model for analytical/structured nodes and a
+    pro model for text generation — without rebuilding the SDK on every call.
+    Both arguments fall back to :class:`~app.core.config.AISettings` defaults
+    (the flash-tier model and the analytical temperature) when omitted.
+
+    The API key is passed explicitly from ``AISettings`` so the client does not
+    silently depend on ambient ``GOOGLE_API_KEY`` / ``GEMINI_API_KEY`` env vars.
     """
     settings = get_ai_settings()
     return ChatGoogleGenerativeAI(
-        model=settings.gemini_model,
+        model=model or settings.gemini_model,
         api_key=settings.gemini_api_key,
-        temperature=settings.gemini_temperature,
+        temperature=settings.gemini_temperature if temperature is None else temperature,
+        # Keep retries low: on a hard quota (free-tier limit=0) the client would
+        # otherwise back off and retry for minutes before the node's except fires.
+        max_retries=settings.gemini_max_retries,
     )
