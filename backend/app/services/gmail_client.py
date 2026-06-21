@@ -27,6 +27,7 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
+from googleapiclient.discovery import Resource
 
 from app.core.config import get_gmail_settings
 from app.core.logging import get_logger
@@ -117,7 +118,7 @@ class GmailClient:
         tmp_path.replace(token_path)
         return creds
 
-    def _get_service(self):
+    def _get_service(self) -> Resource:
         """Lazily build and cache the Gmail API service (authenticating first)."""
         if self._service is None:
             creds = self._authenticate()
