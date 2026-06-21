@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, status
 from googleapiclient.errors import HttpError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.dependencies import require_resource
 from app.core.config import get_outreach_settings
 from app.core.logging import get_logger
 from app.db.database import get_session
@@ -70,9 +71,7 @@ async def get_job(
 ) -> JobRead:
     """Fetch a single posting by id."""
     job = await repo.get_by_id(job_id)
-    if job is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="job posting not found")
-    return job
+    return require_resource(job, "job posting not found")
 
 
 @router.patch("/{job_id}", response_model=JobRead)
@@ -83,9 +82,7 @@ async def update_job_status_and_score(
 ) -> JobRead:
     """Update a posting's status and/or match score."""
     job = await repo.update_status_and_score(job_id, payload)
-    if job is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="job posting not found")
-    return job
+    return require_resource(job, "job posting not found")
 
 
 @router.delete("/{job_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -99,8 +96,7 @@ async def delete_job(
     dedup never re-ingests it. Returns 204 on success, 404 if unknown.
     """
     deleted = await repo.soft_delete(job_id)
-    if deleted is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="job posting not found")
+    require_resource(deleted, "job posting not found")
 
 
 @router.post("/{job_id}/match", response_model=JobMatchResponse)
