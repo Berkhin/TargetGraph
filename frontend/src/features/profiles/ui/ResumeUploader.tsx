@@ -7,8 +7,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Alert, AlertDescription } from "@/components/ui/alert";
 import { useUploadResume } from "@/features/profiles/hooks/useUploadResume";
 
 export function ResumeUploader() {
@@ -50,21 +48,21 @@ export function ResumeUploader() {
       </CardHeader>
       <CardContent className="space-y-4">
         {isSuccess && (
-          <Alert className="border-green-200 bg-green-50">
-            <CheckCircle className="h-4 w-4 text-green-600" />
-            <AlertDescription className="text-green-800">
+          <div className="flex gap-2 rounded-md border border-green-200 bg-green-50 p-3">
+            <CheckCircle className="h-5 w-5 flex-shrink-0 text-green-600 mt-0.5" />
+            <p className="text-sm text-green-800">
               Профиль успешно создан из резюме &quot;{fileName}&quot;
-            </AlertDescription>
-          </Alert>
+            </p>
+          </div>
         )}
 
         {isError && (
-          <Alert variant="destructive">
-            <AlertCircle className="h-4 w-4" />
-            <AlertDescription>
+          <div className="flex gap-2 rounded-md border border-red-200 bg-red-50 p-3">
+            <AlertCircle className="h-5 w-5 flex-shrink-0 text-red-600 mt-0.5" />
+            <p className="text-sm text-red-800">
               Ошибка при загрузке резюме. Убедитесь, что это валидный PDF файл.
-            </AlertDescription>
-          </Alert>
+            </p>
+          </div>
         )}
 
         <div
