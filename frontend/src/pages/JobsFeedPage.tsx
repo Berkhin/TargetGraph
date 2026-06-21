@@ -1,7 +1,10 @@
+import { Zap } from "lucide-react";
 import { JobCard } from "@/features/jobs-board/ui/JobCard";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Button } from "@/components/ui/button";
 import { useJobs } from "@/features/jobs-board/hooks/useJobs";
 import { useActiveProfile } from "@/features/profiles/hooks/useActiveProfile";
+import { useTriggerSourcing } from "@/features/jobs-board/hooks/useTriggerSourcing";
 import { getApiErrorMessage } from "@/shared/api/errors";
 
 function JobCardSkeleton() {
@@ -17,19 +20,29 @@ function JobCardSkeleton() {
 
 export function JobsFeedPage() {
   const { data: jobs, isPending, isError, error } = useJobs();
-  // Active profile drives the AI matching call; until it loads (or if none
-  // exists) the generate button stays disabled.
   const { data: profile } = useActiveProfile();
+  const triggerSourcing = useTriggerSourcing();
 
   return (
     <main className="mx-auto px-4 py-10">
-      <header className="mb-8">
-        <h1 className="text-3xl font-semibold tracking-tight">Jobs Feed</h1>
-        <p className="text-muted-foreground">
-          {profile
-            ? `Сопоставление с профилем: ${profile.candidate_name}`
-            : "Sourced postings ready for AI matching."}
-        </p>
+      <header className="mb-8 flex items-center justify-between">
+        <div>
+          <h1 className="text-3xl font-semibold tracking-tight">Jobs Feed</h1>
+          <p className="text-muted-foreground">
+            {profile
+              ? `Сопоставление с профилем: ${profile.candidate_name}`
+              : "Sourced postings ready for AI matching."}
+          </p>
+        </div>
+        <Button
+          onClick={() => triggerSourcing.mutate()}
+          disabled={triggerSourcing.isPending}
+          variant="outline"
+          size="sm"
+        >
+          <Zap className="h-4 w-4 mr-2" />
+          {triggerSourcing.isPending ? "Searching..." : "Find Jobs"}
+        </Button>
       </header>
 
       {isPending ? (
