@@ -14,7 +14,7 @@ export function useTriggerSourcing() {
       toast.success("Sourcing job started", {
         description: "Looking for new job postings...",
       });
-      queryClient.invalidateQueries({ queryKey: jobsKeys.all() });
+      queryClient.invalidateQueries({ queryKey: jobsKeys.all });
     },
     onError: (error) => {
       toast.error("Failed to trigger sourcing", {
