@@ -33,6 +33,7 @@ from app.services.orchestrator import (
     match_and_save,
     run_pipeline_stream,
 )
+from app.tasks.sourcing_task import run_sourcing_job
 
 logger = get_logger(__name__)
 
@@ -225,6 +226,33 @@ async def send_outreach_email(
         message_id=result.get("id"),
         to_email=payload.to_email,
     )
+
+
+@router.post("/sourcing/trigger", status_code=status.HTTP_202_ACCEPTED)
+async def trigger_sourcing() -> dict[str, str]:
+    """Manually trigger the sourcing job (find new postings for all profiles).
+
+    Runs the same job that APScheduler runs daily at 03:00 UTC. Returns 202
+    (Accepted) immediately; the job runs asynchronously in the background.
+    All postings found will be persisted to the database and available on the
+    jobs board.
+
+    This is a fire-and-forget endpoint: use the jobs board to check for new
+    postings once the job completes (usually within 1-2 minutes).
+    """
+    try:
+        # Fire-and-forget: schedule the job to run in a background task.
+        # We don't await it here so the endpoint returns immediately.
+        import asyncio
+        asyncio.create_task(run_sourcing_job())
+        logger.info("sourcing_job_triggered_manually")
+        return {"status": "triggered", "message": "Sourcing job started in background"}
+    except Exception as e:
+        logger.error("sourcing_trigger_failed", extra={"error": str(e)})
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to trigger sourcing job",
+        )
 
 
 @router.websocket("/{job_id}/ws-match")
