@@ -83,6 +83,65 @@ class TailoredCV(BaseModel):
     )
 
 
+class MatchResult(BaseModel):
+    """Structured scoring target for a profile/requirements comparison.
+
+    Bound to the model via ``with_structured_output`` so Gemini returns the
+    score and its justification directly. The skill buckets make the score
+    auditable — they show *which* requirements drove it up or down.
+    """
+
+    score: int = Field(
+        description="Overall fit, 0-100. Reserve 90+ for near-perfect matches.",
+    )
+    matching_skills: list[str] = Field(
+        default_factory=list,
+        description="Requirements clearly evidenced in the candidate profile.",
+    )
+    missing_skills: list[str] = Field(
+        default_factory=list,
+        description="Requirements absent from the profile, critical ones first.",
+    )
+    reasoning: str = Field(
+        description="Brief justification (1-3 sentences) for the score.",
+    )
+
+
+class ReviewResult(BaseModel):
+    """Structured output target for the ``reviewer`` node.
+
+    Captures whether the draft cover letter is ready for submission and any
+    factual or stylistic issues that need addressing. An empty ``comments``
+    list signals approval.
+    """
+
+    is_approved: bool = Field(
+        description="True if the cover letter is ready to send (no hallucinations, professional tone).",
+    )
+    comments: list[str] = Field(
+        default_factory=list,
+        description="Specific hallucinations, fabrications, or stylistic issues (empty if approved).",
+    )
+
+
+class RelevanceResult(BaseModel):
+    """Structured output target for the cheap sourcing pre-screen.
+
+    Bound to the model via ``with_structured_output`` so Gemini returns a fit
+    score and a one-line reason directly. Deliberately lighter than
+    :class:`MatchResult` — it runs once per *newly sourced* posting before the
+    expensive matching pipeline, so it only needs a coarse keep/drop signal.
+    """
+
+    score: int = Field(
+        description="Relevance 0-100. Under 55 = clearly off-target (wrong field "
+        "/ no overlap); 55+ = plausibly worth showing to the candidate.",
+    )
+    reason: str = Field(
+        description="Brief justification (1-2 sentences) for the score.",
+    )
+
+
 class GraphState(BaseModel):
     """End-to-end state for the job/profile matching workflow."""
 
