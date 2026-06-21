@@ -1,5 +1,12 @@
 # Component Specification: Email Discovery & Verification Engine
 
+> **Статус: автономный компонент, НЕ в основном пайплайне.** Движок реализован
+> ([backend/app/services/email_verification/](../backend/app/services/email_verification/))
+> и доступен как отдельный REST-эндпоинт `POST /api/v1/contacts/verify-email`. В
+> живом пайплайне холодного аутрича поиск контактов делает **Hunter.io**
+> ([AI_Layer_Spec.md](./AI_Layer_Spec.md) §5), а не этот SMTP-движок. Документ
+> описывает компонент как самостоятельный сервис/будущую альтернативу.
+
 ## 1. Назначение
 Сервис для асинхронной генерации и валидации email-адресов рекрутеров с защитой от Catch-All доменов и обходом блокировок провайдеров через SOCKS5-прокси.
 

@@ -1,8 +1,12 @@
 # Component Specification: Sourcing Layer (LinkedIn Jobs via Apify)
 
 Автономный слой поиска вакансий. Периодически опрашивает LinkedIn Jobs через
-Apify-актора, дедуплицирует результаты и сохраняет новые вакансии со статусом
-`NEW`, готовые для AI-пайплайна сопоставления.
+Apify-актора, дедуплицирует результаты и сохраняет новые вакансии для AI-пайплайна
+сопоставления. Каждый **новый** постинг проходит дешёвый пре-скрин релевантности
+`evaluate_job_relevance()` (Gemini Flash-Lite): score `< 55` → `FILTERED_OUT`,
+иначе → `NEW`. Пре-скрин **fail-open**: ошибка LLM или пустой score → `NEW`, чтобы
+сбой Gemini не отсеивал молча все вакансии (см.
+[AI_Layer_Spec.md](./AI_Layer_Spec.md) §6).
 
 ## 1. Архитектура и границы
 
@@ -23,9 +27,9 @@ APScheduler (lifespan) ──► run_sourcing_job (tasks/sourcing_task.py)
   `JobCreate`. Никакого ручного HTTP — только `apify_client.ApifyClientAsync`.
 * **`app/tasks/sourcing_task.py`** — шов между сервисом и персистентностью.
   Читает профили, запускает актора, сохраняет новые постинги.
-* **`app/main.py`** (lifespan) — `AsyncIOScheduler` с триггером `interval`,
-  `max_instances=1`, `coalesce=True`. Стартует на старте приложения, гасится на
-  выходе.
+* **`app/main.py`** (lifespan) — `AsyncIOScheduler` с триггером `cron`
+  (ежедневно **03:00 UTC**), `max_instances=1`, `coalesce=True`. Стартует на старте
+  приложения, гасится на выходе.
 * **`SourcingSettings`** (`app/core/config.py`) — конфигурация слоя.
 
 ## 2. Входной контракт актора (важно!)
