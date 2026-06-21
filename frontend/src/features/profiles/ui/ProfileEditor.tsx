@@ -17,6 +17,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { useActiveProfile } from "@/features/profiles/hooks/useActiveProfile";
 import { useUpdateProfile } from "@/features/profiles/hooks/useUpdateProfile";
+import { ResumeUploader } from "@/features/profiles/ui/ResumeUploader";
 import type { ProfileRead, ProfileUpdate } from "@/contracts/profile";
 import { getApiErrorMessage } from "@/shared/api/errors";
 
@@ -145,9 +146,14 @@ export function ProfileEditor() {
     const status = isAxiosError(error) ? error.response?.status : undefined;
     if (status === 404) {
       return (
-        <p className="text-muted-foreground">
-          Профиль ещё не создан. Засидите его на бэкенде (seed_profile.py).
-        </p>
+        <div className="space-y-6">
+          <div className="text-center">
+            <p className="text-muted-foreground mb-6">
+              Профиль ещё не создан. Загрузите резюме PDF или создайте вручную.
+            </p>
+          </div>
+          <ResumeUploader />
+        </div>
       );
     }
     return (
