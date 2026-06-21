@@ -26,7 +26,8 @@ Apify (LinkedIn)  →  Pre-screen (Gemini Flash)  →  LangGraph pipeline  →  
 - **LangGraph matching** — extract requirements → score → **parallel** tailored-CV
   generation and Hunter.io recruiter lookup → personalised cover letter → a strict
   reviewer with a bounded revision loop.
-- **Real-time progress** — WebSocket streaming of the pipeline node-by-node.
+- **Real-time execution telemetry** — WebSocket streaming pushes state changes from
+  the parallel LangGraph nodes straight to the UI, node-by-node, with no polling.
 - **One-click outreach** — client-rendered PDF CV emailed to the recruiter via the
   Gmail API; the posting is stamped `applied_at`.
 
@@ -89,7 +90,8 @@ Settings are defined in [backend/app/core/config.py](backend/app/core/config.py)
 | `GEMINI_MODEL` / `GEMINI_GENERATION_MODEL` | AI pipeline | default `gemini-3.1-flash-lite`; point at a Pro tier to upgrade |
 | `APIFY_TOKEN` | sourcing | required; validated at startup |
 | `HUNTER_API_KEY` | contact discovery | optional; without it, outreach has no recruiter contact |
-| `GMAIL_CREDENTIALS_FILE` / `GMAIL_TOKEN_FILE` | email send | OAuth artefacts (git-ignored) |
+| `GMAIL_CREDENTIALS_FILE` | email send | OAuth 2.0 Desktop-App JSON downloaded from the Google Cloud Console (git-ignored) |
+| `GMAIL_TOKEN_FILE` | email send | cached OAuth token, written on first consent (git-ignored) |
 | `DATABASE_URL` | persistence | PostgreSQL (prod) / SQLite (dev) |
 
 ## Testing
