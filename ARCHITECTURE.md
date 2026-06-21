@@ -23,6 +23,27 @@ For deeper per-component specs see [`docs/`](docs/); for the change history see
    (scheduled)          vs NEW                 _BY_AI by score
 ```
 
+```mermaid
+flowchart TD
+    A[Apify LinkedIn Jobs] --> B{Pre-screen<br/>Gemini Flash-Lite}
+    B -- "score &lt; 55" --> C[FILTERED_OUT]
+    B -- "score &ge; 55 / fail-open" --> N[NEW]
+    N -. user triggers match .-> M{match_profile<br/>score gate}
+    M -- "&lt; threshold (def. 50)" --> R[REJECTED_BY_AI]
+    subgraph par [parallel fan-out]
+        P1[generate_tailored_cv]
+        P2["find_recruiter_contact<br/>Hunter.io"]
+    end
+    M -- "&ge; threshold" --> P1
+    M -- "&ge; threshold" --> P2
+    P2 --> CL[generate_cover_letter]
+    P1 --> RV[reviewer]
+    CL --> RV
+    RV -- "comments &amp; revision &lt; 3" --> CL
+    RV -- "approved / revision = 3" --> MA[MATCHED]
+    MA --> O["Outreach: jsPDF (client) + Gmail REST"]
+```
+
 1. **Sourcing — Apify LinkedIn Jobs.** `run_sourcing_job`
    ([backend/app/tasks/sourcing_task.py](backend/app/tasks/sourcing_task.py)) runs
    on an APScheduler **cron** trigger (daily 03:00 UTC,
