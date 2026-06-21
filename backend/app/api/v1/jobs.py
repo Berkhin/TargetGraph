@@ -25,11 +25,11 @@ from app.repositories.job_repository import JobRepository
 from app.services.gmail_client import GmailClient, get_gmail_client
 from app.services.outreach import append_engineering_disclaimer
 from app.services.orchestrator import (
-    _DEFAULT_SCORE_THRESHOLD,
     JobNotFoundError,
     ProfileNotFoundError,
+    PipelineDegradedError,
     PipelineExecutionError,
-    run_pipeline,
+    match_and_save,
     run_pipeline_stream,
 )
 
@@ -105,11 +105,10 @@ async def match_job(
     Raises:
         404: If job_id or profile_id does not exist in the database.
         422: If AI pipeline execution fails.
+        503: If the model is unavailable (quota) and produced no verdict.
     """
     try:
-        pipeline_result = await run_pipeline(
-            job_id, profile_id, session, save_results=False
-        )
+        job = await match_and_save(job_id, profile_id, session)
     except JobNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -120,54 +119,15 @@ async def match_job(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"profile {profile_id} not found",
         )
-    except PipelineExecutionError:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="AI pipeline execution failed. Please try again later.",
-        )
-
-    # Save results at the end, after all checks pass
-    match_score = pipeline_result.get("match_score", 0)
-    cover_letter = pipeline_result.get("cover_letter_draft") or ""
-    tailored_cv = pipeline_result.get("tailored_cv")
-    drafting_failed = bool(pipeline_result.get("drafting_failed"))
-    analysis_failed = bool(pipeline_result.get("analysis_failed"))
-
-    # Infra/quota failure during analysis or drafting: don't persist a false
-    # verdict (REJECTED) or a broken MATCHED — leave the job NEW and report the
-    # outage so the client can retry later.
-    if analysis_failed or (
-        match_score >= _DEFAULT_SCORE_THRESHOLD
-        and (drafting_failed or not cover_letter.strip())
-    ):
+    except PipelineDegradedError:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="AI evaluation/generation is unavailable (model quota). Try again later.",
         )
-
-    result_status = (
-        JobStatus.MATCHED
-        if match_score >= _DEFAULT_SCORE_THRESHOLD
-        else JobStatus.REJECTED_BY_AI
-    )
-
-    repo = JobRepository(session)
-    await repo.save_match_results(
-        job_id,
-        match_score,
-        cover_letter,
-        result_status,
-        tailored_cv,
-        recruiter_name=pipeline_result.get("recruiter_name"),
-        recruiter_email=pipeline_result.get("recruiter_email"),
-    )
-
-    # Fetch the updated job and return it
-    job = await repo.get_by_id(job_id)
-    if job is None:
+    except PipelineExecutionError:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="job posting disappeared after pipeline execution",
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="AI pipeline execution failed. Please try again later.",
         )
 
     return JobMatchResponse.model_validate(job)

@@ -39,9 +39,24 @@ class ExtractedRequirements(BaseModel):
         """True when no requirements were extracted into any bucket."""
         return not (self.hard_skills or self.soft_skills or self.core_responsibilities)
 
+    def to_prompt_block(self) -> str:
+        """Render the buckets as a single tagged block for the LLM prompts.
+
+        Each line is criticality-tagged (``[HARD]`` / ``[soft]`` / ``[resp]``) so
+        downstream nodes can lead with the hard skills. Shared by every node that
+        feeds the requirements to the model (match / draft / tailored-CV / review)
+        so the tag format has a single source of truth.
+        """
+        lines = [
+            *(f"- [HARD] {s}" for s in self.hard_skills),
+            *(f"- [soft] {s}" for s in self.soft_skills),
+            *(f"- [resp] {s}" for s in self.core_responsibilities),
+        ]
+        return "\n".join(lines) or "(none extracted)"
+
 
 class GeneratedDocuments(BaseModel):
-    """Structured output target for the ``draft_documents`` node.
+    """Structured output target for the ``generate_cover_letter`` node.
 
     Bound to the model via ``with_structured_output`` so Gemini returns the
     cover letter as a single field rather than free-form prose we would have to

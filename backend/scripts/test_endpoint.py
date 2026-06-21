@@ -6,7 +6,6 @@ Assumes the FastAPI server is running on http://localhost:8000.
 import asyncio
 import httpx
 import sys
-from uuid import UUID
 from sqlalchemy import select
 from app.db.database import AsyncSessionLocal
 from app.models.sql.profile import MasterProfile

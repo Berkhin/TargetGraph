@@ -43,7 +43,6 @@ async def run_full_integration_test():
                 job_id=created_job.id,
                 profile_id=profile_record.id,
                 session=session,
-                save_results=False  # Will save manually below for testing
             )
 
             # Manual save for testing

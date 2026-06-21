@@ -238,6 +238,14 @@ class AISettings(BaseSettings):
         description="Max client retries on transient/quota errors; low so a hard "
         "quota (limit=0) fails fast instead of backing off for minutes.",
     )
+    gemini_requests_per_minute: int = Field(
+        default=15,
+        ge=1,
+        validation_alias="GEMINI_REQUESTS_PER_MINUTE",
+        description="Client-side cap on Gemini calls per minute, shared across all "
+        "graph nodes and the sourcing pre-screen, to stay under the free-tier RPM "
+        "quota (flash-lite = 15/min). Lower it if you still see 429s.",
+    )
     # The reviewer fact-checks the cover letter and can trigger up to 3 redraft
     # passes — i.e. several extra LLM calls per job. Off by default to conserve the
     # tiny free-tier daily quota; enable it when quota (billing) is not a concern.
@@ -330,14 +338,14 @@ class SourcingSettings(BaseSettings):
         description="Fallback search location when a profile has none set.",
     )
     force_default_location: bool = Field(
-        default=True,
+        default=False,
         validation_alias="SOURCING_FORCE_DEFAULT_LOCATION",
         description=(
-            "When true, every run uses default_location and the profile's own "
-            "preferred location is ignored. Some regions return little or nothing "
-            "on LinkedIn, so we source from a location with dense coverage "
-            "(default 'Israel', which includes remote-friendly roles). "
-            "Set false to honour each profile's preferred location instead."
+            "When true, every run ignores each profile's preferred location and "
+            "uses default_location instead. Off by default: the search region is "
+            "taken from the candidate's profile (e.g. 'Israel'), falling back to "
+            "default_location only when the profile sets none. Set true to force a "
+            "single region with dense LinkedIn coverage for every profile."
         ),
     )
     interval_hours: int = Field(

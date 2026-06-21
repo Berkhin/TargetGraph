@@ -38,6 +38,7 @@ from typing import Any
 
 from apify_client import ApifyClientAsync
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.ai.nodes import evaluate_job_relevance
 from app.core.config import get_sourcing_settings
@@ -87,7 +88,9 @@ def _build_query(titles: list[str]) -> str:
     return " OR ".join(f'"{title}"' for title in titles)
 
 
-async def run_sourcing_job(session_factory: Any = AsyncSessionLocal) -> None:
+async def run_sourcing_job(
+    session_factory: async_sessionmaker[AsyncSession] = AsyncSessionLocal,
+) -> None:
     """Fetch fresh postings for every profile and persist new ones.
 
     One Apify actor run per profile (titles OR-joined), bounded by

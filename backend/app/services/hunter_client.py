@@ -17,6 +17,8 @@ surrounding pipeline.
 
 from __future__ import annotations
 
+from contextlib import AsyncExitStack
+
 import httpx
 
 from app.core.config import get_hunter_settings
@@ -99,25 +101,25 @@ class HunterClient:
             params["department"] = department
 
         try:
-            if self._client is not None:
-                response = await self._client.get(
+            # Reuse the injected client if given, else create one scoped to this
+            # call; either way the per-request timeout applies uniformly so a hung
+            # request can never stall the caller.
+            async with AsyncExitStack() as stack:
+                client = self._client or await stack.enter_async_context(
+                    httpx.AsyncClient()
+                )
+                response = await client.get(
                     _HUNTER_DOMAIN_SEARCH_URL,
                     params=params,
                     timeout=_REQUEST_TIMEOUT_SECONDS,
                 )
-            else:
-                async with httpx.AsyncClient(
-                    timeout=_REQUEST_TIMEOUT_SECONDS
-                ) as client:
-                    response = await client.get(
-                        _HUNTER_DOMAIN_SEARCH_URL, params=params
-                    )
-            response.raise_for_status()
-            # Parse inside the try: a 200 with a non-JSON body (HTML stub,
-            # truncated response) raises ValueError (json.JSONDecodeError), which
-            # is NOT an httpx.HTTPError — without this it would escape the
-            # documented fail-soft contract.
-            payload = response.json()
+                response.raise_for_status()
+                # Parse inside the context (and the try): a 200 with a non-JSON
+                # body (HTML stub, truncated response) raises ValueError
+                # (json.JSONDecodeError), which is NOT an httpx.HTTPError — without
+                # catching it here it would escape the documented fail-soft
+                # contract. Reading the body while the owned client is still open.
+                payload = response.json()
         except (httpx.HTTPError, ValueError) as exc:
             logger.error(
                 "hunter_search_failed",

@@ -48,19 +48,78 @@ _LINKEDIN_JOBS_SEARCH_URL = "https://www.linkedin.com/jobs/search/"
 # ``pages`` setting into an equivalent result count.
 _RESULTS_PER_PAGE = 25
 
+# LinkedIn's guest search only geo-filters reliably when the URL carries a numeric
+# ``geoId``; the free-text ``location`` alone is matched loosely and frequently
+# falls back to broad / US-centric results (the cause of "I set Israel but get
+# US/Canada postings"). We map the locations we support to their LinkedIn geoId
+# and attach it; unknown locations still send the text param (LinkedIn best-effort)
+# and can be added here as the need arises.
+_LINKEDIN_GEO_IDS: dict[str, str] = {
+    "israel": "101620260",
+    "united states": "103644278",
+    "united states of america": "103644278",
+    "usa": "103644278",
+    "us": "103644278",
+    "canada": "101174742",
+    "united kingdom": "101165590",
+    "uk": "101165590",
+    "germany": "101282230",
+    "netherlands": "102890719",
+}
+
+
+def _resolve_geo_id(location: str) -> str | None:
+    """Map a location string to its LinkedIn ``geoId``, or ``None`` if unknown.
+
+    Matches the whole string first, then the last comma-separated component, so
+    ``"Tel Aviv-Yafo, Israel"`` resolves via ``"israel"``. An unknown location
+    returns ``None`` and the caller sends only the free-text ``location``.
+    """
+    key = location.strip().lower()
+    if key in _LINKEDIN_GEO_IDS:
+        return _LINKEDIN_GEO_IDS[key]
+    tail = key.rsplit(",", 1)[-1].strip()
+    return _LINKEDIN_GEO_IDS.get(tail)
+
 
 def _linkedin_search_url(query: str, location: str) -> str:
     """Build a LinkedIn guest job-search URL from a Boolean query + location.
 
     ``urlencode`` percent-encodes the quotes/OR in the Boolean query and any
     spaces in the location, producing the ``urls`` entry the actor requires, e.g.
-    ``https://www.linkedin.com/jobs/search/?keywords=%22AI+Engineer%22&location=Israel``.
+    ``…/jobs/search/?keywords=%22AI+Engineer%22&location=Israel&geoId=101620260``.
+    A resolvable ``geoId`` is appended so LinkedIn actually restricts results to
+    that region (see ``_LINKEDIN_GEO_IDS``).
     """
-    return f"{_LINKEDIN_JOBS_SEARCH_URL}?{urlencode({'keywords': query, 'location': location})}"
+    params = {"keywords": query, "location": location}
+    geo_id = _resolve_geo_id(location)
+    if geo_id:
+        params["geoId"] = geo_id
+    return f"{_LINKEDIN_JOBS_SEARCH_URL}?{urlencode(params)}"
 
 
 class SourcingError(Exception):
     """An Apify actor run failed (bad token, actor error, or missing dataset)."""
+
+
+def _first(raw: dict, *keys: str) -> str | None:
+    """Return the first non-empty value among ``keys``, or ``None``.
+
+    The curious_coder actor renamed fields across builds (e.g. ``companyName`` vs
+    legacy ``company``), so each mapped field reads new-then-old. Empty strings
+    count as absent, so a blank value never shadows a populated alias — or lands
+    in a NOT-NULL/``min_length`` column.
+    """
+    for key in keys:
+        value = raw.get(key)
+        if value:
+            return value
+    return None
+
+
+def _truncate(value: str | None, limit: int) -> str | None:
+    """Clamp an optional string to ``limit`` chars, preserving ``None``."""
+    return value[:limit] if value else None
 
 
 def _run_field(run: object, attr: str, alias: str) -> object:
@@ -182,47 +241,36 @@ def _to_job_create(raw: dict) -> JobCreate | None:
     Returns ``None`` (logged) if the item lacks any job id, which is the stable
     dedup key — without it we cannot safely deduplicate, so we skip it.
     """
-    job_id = raw.get("id") or raw.get("job_id")
-    if not job_id:
+    raw_job_id = _first(raw, "id", "job_id")
+    if not raw_job_id:
         logger.warning(
             "sourcing_result_missing_job_id",
             extra={
-                "job_title": raw.get("title") or raw.get("job_title"),
-                "company": raw.get("companyName") or raw.get("company"),
+                "job_title": _first(raw, "title", "job_title"),
+                "company": _first(raw, "companyName", "company"),
             },
         )
         return None
 
-    job_id = str(job_id)
+    # LinkedIn ids may arrive as ints; coerce to the str the dedup key expects.
+    job_id = str(raw_job_id)
     # The job URL should always be present, but the (min_length=1) DTO field must
     # never be empty, so fall back to a synthetic, dedup-stable URL.
-    source_url = (raw.get("link") or raw.get("job_url") or f"apify://{job_id}")[:2048]
-
-    # Rich, optional metadata from the LinkedIn jobs scraper. .get() returns None
-    # when the key is absent, so a sparse item never raises here.
-    location = raw.get("location")
-    employment_type = raw.get("employmentType")
-    seniority_level = raw.get("seniorityLevel")
-    salary_raw = raw.get("salary")
-    salary = salary_raw if salary_raw else None  # guard against empty string ""
-    # The employer's own website — used downstream for an accurate Hunter.io
-    # recruiter lookup. Empty string guarded so we store NULL, not "".
-    company_website = raw.get("companyWebsite") or None
-
-    # Prefer the plain-text description (better for the LLM) over the HTML one.
-    description = (
-        raw.get("descriptionText") or raw.get("description") or _NO_DESCRIPTION
-    )
+    source_url = (_first(raw, "link", "job_url") or f"apify://{job_id}")[:2048]
 
     return JobCreate(
-        company_name=(raw.get("companyName") or raw.get("company") or _UNKNOWN)[:255],
-        job_title=(raw.get("title") or raw.get("job_title") or _UNKNOWN)[:255],
-        description=description,
+        company_name=_truncate(_first(raw, "companyName", "company") or _UNKNOWN, 255),
+        job_title=_truncate(_first(raw, "title", "job_title") or _UNKNOWN, 255),
+        # Prefer the plain-text description (better for the LLM) over the HTML one.
+        description=_first(raw, "descriptionText", "description") or _NO_DESCRIPTION,
         source_url=source_url,
         source_job_id=job_id[:512],
-        location=location[:255] if location else None,
-        employment_type=employment_type[:100] if employment_type else None,
-        seniority_level=seniority_level[:100] if seniority_level else None,
-        salary=salary[:255] if salary else None,
-        company_website=company_website[:255] if company_website else None,
+        # Rich, optional LinkedIn metadata — absent/blank values map to NULL.
+        location=_truncate(_first(raw, "location"), 255),
+        employment_type=_truncate(_first(raw, "employmentType"), 100),
+        seniority_level=_truncate(_first(raw, "seniorityLevel"), 100),
+        salary=_truncate(_first(raw, "salary"), 255),
+        # The employer's own website — used downstream for an accurate Hunter.io
+        # recruiter lookup.
+        company_website=_truncate(_first(raw, "companyWebsite"), 255),
     )

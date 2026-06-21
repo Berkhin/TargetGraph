@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
+from contextlib import suppress
 
 import aiosmtplib
 from aiosmtplib import SMTPResponse
@@ -142,7 +143,6 @@ class SmtpProber:
         try:
             await client.quit()
         except (aiosmtplib.SMTPException, asyncio.TimeoutError, OSError):
-            try:
+            # QUIT failed — force the socket shut, ignoring any teardown error.
+            with suppress(Exception):  # pragma: no cover - best-effort cleanup
                 client.close()
-            except Exception:  # pragma: no cover - best-effort cleanup
-                pass
