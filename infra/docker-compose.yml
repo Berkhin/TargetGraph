@@ -26,6 +26,34 @@ services:
       retries: 10
     restart: unless-stopped
 
+  # FastAPI app. Reachable to the frontend container as host `backend` on the
+  # default compose network — this is the name Nginx proxies to.
+  backend:
+    build:
+      context: ../backend
+    container_name: targetgraph-backend
+    init: true
+    env_file:
+      - ../.env
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    # No host port published: traffic reaches it only via the Nginx proxy.
+    expose:
+      - "8000"
+
+  # Nginx serves the built SPA and reverse-proxies /api (REST + WS) to backend.
+  frontend:
+    build:
+      context: ../frontend
+    container_name: targetgraph-frontend
+    depends_on:
+      - backend
+    ports:
+      - "${FRONTEND_PORT:-80}:80"
+    restart: unless-stopped
+
 volumes:
   pgdata:
     name: targetgraph_pgdata
