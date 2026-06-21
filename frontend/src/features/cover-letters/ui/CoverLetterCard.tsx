@@ -1,14 +1,23 @@
 import { useState } from "react";
-import { Copy, Download, ExternalLink, RefreshCw, Send } from "lucide-react";
+import {
+  Copy,
+  Download,
+  ExternalLink,
+  RefreshCw,
+  Send,
+  Trash2,
+} from "lucide-react";
 import { toast } from "sonner";
 import {
   Card,
+  CardAction,
   CardContent,
   CardDescription,
   CardFooter,
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -28,6 +37,7 @@ import {
   downloadCvPdf,
 } from "@/features/cover-letters/lib/cvToPdf";
 import type { JobRead } from "@/features/jobs-board/api/types";
+import { useDeleteJob } from "@/features/jobs-board/hooks/useDeleteJob";
 import { useMatchJobStream } from "@/features/jobs-board/hooks/useMatchJobStream";
 import { useSendOutreach } from "@/features/jobs-board/hooks/useSendOutreach";
 import { StreamTerminal } from "@/features/jobs-board/ui/StreamTerminal";
@@ -75,6 +85,11 @@ export function CoverLetterCard({ job, profileId }: CoverLetterCardProps) {
   // a duplicate email.
   const [isPreparing, setIsPreparing] = useState(false);
   const isSending = isPreparing || sendOutreach.isPending;
+
+  // Delete (soft) with a confirm dialog — clearing a generated card is
+  // irreversible from the UI, so the user confirms first.
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const deleteJob = useDeleteJob(job.id);
 
   const submitSend = async () => {
     if (isSending) return; // re-entry guard: swallows a double click mid-build
@@ -140,6 +155,13 @@ export function CoverLetterCard({ job, profileId }: CoverLetterCardProps) {
       <CardHeader>
         <CardTitle>{job.job_title}</CardTitle>
         <CardDescription>{job.company_name}</CardDescription>
+        {job.applied_at ? (
+          <CardAction>
+            <Badge variant="secondary">
+              Подано · {new Date(job.applied_at).toLocaleDateString()}
+            </Badge>
+          </CardAction>
+        ) : null}
       </CardHeader>
 
       <CardContent>
@@ -229,6 +251,14 @@ export function CoverLetterCard({ job, profileId }: CoverLetterCardProps) {
           <RefreshCw className={isGenerating ? "animate-spin" : undefined} />
           {isGenerating ? "Регенерация..." : "Регенерировать"}
         </Button>
+        {/* Soft-delete this card (marks it DISCARDED). Opens a confirm dialog. */}
+        <Button
+          variant="destructive"
+          disabled={deleteJob.isPending}
+          onClick={() => setDeleteOpen(true)}
+        >
+          <Trash2 /> Удалить
+        </Button>
       </CardFooter>
 
       {/* Outreach send dialog — review/edit recipient, subject, and body before
@@ -293,6 +323,41 @@ export function CoverLetterCard({ job, profileId }: CoverLetterCardProps) {
             >
               <Send />
               {isSending ? "Отправка..." : "Отправить"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete confirmation — soft-delete is reversible only in the DB, so
+          confirm before removing the card from the board. */}
+      <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Удалить карточку?</DialogTitle>
+            <DialogDescription>
+              «{job.job_title} — {job.company_name}» исчезнет из списка откликов.
+              Это действие нельзя отменить из интерфейса.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setDeleteOpen(false)}
+              disabled={deleteJob.isPending}
+            >
+              Отмена
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={deleteJob.isPending}
+              onClick={() =>
+                deleteJob.mutate(undefined, {
+                  onSuccess: () => setDeleteOpen(false),
+                })
+              }
+            >
+              <Trash2 />
+              {deleteJob.isPending ? "Удаление..." : "Удалить"}
             </Button>
           </DialogFooter>
         </DialogContent>

@@ -18,6 +18,7 @@ from functools import lru_cache
 from urllib.parse import urlparse
 
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.runnables import Runnable
 from pydantic import BaseModel, Field
 
 from app.ai.llm import get_llm
@@ -25,6 +26,9 @@ from app.ai.state import (
     ExtractedRequirements,
     GeneratedDocuments,
     GraphState,
+    MatchResult,
+    ReviewResult,
+    RelevanceResult,
     TailoredCV,
 )
 from app.core.config import get_ai_settings
@@ -294,7 +298,7 @@ _REVIEW_SYSTEM_PROMPT = (
 
 
 @lru_cache(maxsize=1)
-def _get_extraction_chain():
+def _get_extraction_chain() -> Runnable:
     """Return the cached structured-output chain (base LLM + schema binding).
 
     ``with_structured_output`` builds a new runnable on each call; binding it
@@ -306,7 +310,7 @@ def _get_extraction_chain():
 
 
 @lru_cache(maxsize=1)
-def _get_match_chain():
+def _get_match_chain() -> Runnable:
     """Return the cached structured-output chain for profile matching.
 
     Same caching contract as :func:`_get_extraction_chain`: tests swapping the
@@ -316,7 +320,7 @@ def _get_match_chain():
 
 
 @lru_cache(maxsize=1)
-def _get_draft_chain():
+def _get_draft_chain() -> Runnable:
     """Return the cached structured-output chain for cover-letter drafting.
 
     Uses the pro-tier generation model at the cover-letter temperature (higher,
@@ -331,7 +335,7 @@ def _get_draft_chain():
 
 
 @lru_cache(maxsize=1)
-def _get_review_chain():
+def _get_review_chain() -> Runnable:
     """Return the cached structured-output chain for reviewing drafts.
 
     Same caching contract as :func:`_get_extraction_chain`: tests swapping the
@@ -341,7 +345,7 @@ def _get_review_chain():
 
 
 @lru_cache(maxsize=1)
-def _get_relevance_chain():
+def _get_relevance_chain() -> Runnable:
     """Return the cached structured-output chain for the sourcing pre-screen.
 
     Same caching contract as :func:`_get_extraction_chain`: tests swapping the
@@ -351,7 +355,7 @@ def _get_relevance_chain():
 
 
 @lru_cache(maxsize=1)
-def _get_tailored_cv_chain():
+def _get_tailored_cv_chain() -> Runnable:
     """Return the cached structured-output chain for tailored-CV generation.
 
     Uses the pro-tier generation model at the (low) tailored-CV temperature, to

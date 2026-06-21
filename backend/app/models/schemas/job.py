@@ -87,6 +87,8 @@ class JobRead(JobBase):
     cover_letter_draft: str | None
     tailored_cv_draft: str | None
     source_job_id: str | None
+    # Timestamp of a successful recruiter outreach send; null until applied.
+    applied_at: datetime.datetime | None
     created_at: datetime.datetime
     updated_at: datetime.datetime
 

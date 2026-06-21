@@ -74,7 +74,7 @@ app.add_middleware(
     allow_credentials=True,
     # The API only exposes these verbs (plus preflight OPTIONS); narrower than
     # "*" to keep the surface tight.
-    allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 

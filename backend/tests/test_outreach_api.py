@@ -106,6 +106,59 @@ async def test_send_outreach_success(session: AsyncSession) -> None:
 
 
 @pytest.mark.asyncio
+async def test_send_outreach_marks_applied(session: AsyncSession) -> None:
+    """A successful send stamps ``applied_at`` so the card shows "Подано"."""
+    job_id = await _make_job(session)
+    gmail = _FakeGmailClient()
+    client = _wire(session, gmail)
+    try:
+        async with client:
+            resp = await client.post(
+                f"/api/v1/jobs/{job_id}/outreach/send",
+                json={
+                    "to_email": "recruiter@acme.com",
+                    "subject": "Hello",
+                    "body": "Dear Michal, ...",
+                },
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    job = await JobRepository(session).get_by_id(job_id)
+    assert job is not None
+    assert job.applied_at is not None
+
+
+@pytest.mark.asyncio
+async def test_send_outreach_does_not_mark_applied_on_failure(
+    session: AsyncSession,
+) -> None:
+    """A Gmail failure leaves ``applied_at`` null — nothing was sent."""
+    job_id = await _make_job(session)
+
+    class _Resp:
+        status = 403
+        reason = "Forbidden"
+
+    gmail = _FakeGmailClient(error=HttpError(_Resp(), b'{"error": "denied"}'))
+    client = _wire(session, gmail)
+    try:
+        async with client:
+            resp = await client.post(
+                f"/api/v1/jobs/{job_id}/outreach/send",
+                json={"to_email": "x@acme.com", "subject": "Hi", "body": "Hi"},
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert resp.status_code == 500
+    job = await JobRepository(session).get_by_id(job_id)
+    assert job is not None
+    assert job.applied_at is None
+
+
+@pytest.mark.asyncio
 async def test_send_outreach_appends_engineering_disclaimer(
     session: AsyncSession,
 ) -> None:

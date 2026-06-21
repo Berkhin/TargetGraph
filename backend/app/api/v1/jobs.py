@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, status
 from googleapiclient.errors import HttpError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.dependencies import require_resource
 from app.core.config import get_outreach_settings
 from app.core.logging import get_logger
 from app.db.database import get_session
@@ -70,9 +71,7 @@ async def get_job(
 ) -> JobRead:
     """Fetch a single posting by id."""
     job = await repo.get_by_id(job_id)
-    if job is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="job posting not found")
-    return job
+    return require_resource(job, "job posting not found")
 
 
 @router.patch("/{job_id}", response_model=JobRead)
@@ -83,9 +82,21 @@ async def update_job_status_and_score(
 ) -> JobRead:
     """Update a posting's status and/or match score."""
     job = await repo.update_status_and_score(job_id, payload)
-    if job is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="job posting not found")
-    return job
+    return require_resource(job, "job posting not found")
+
+
+@router.delete("/{job_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_job(
+    job_id: uuid.UUID,
+    repo: JobRepository = Depends(get_job_repository),
+) -> None:
+    """Soft-delete a posting (mark it ``DISCARDED``).
+
+    The card disappears from every board, but the row is kept so the sourcing
+    dedup never re-ingests it. Returns 204 on success, 404 if unknown.
+    """
+    deleted = await repo.soft_delete(job_id)
+    require_resource(deleted, "job posting not found")
 
 
 @router.post("/{job_id}/match", response_model=JobMatchResponse)
@@ -203,6 +214,11 @@ async def send_outreach_email(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Outreach email could not be sent (mail service unavailable).",
         )
+
+    # Mark the posting as applied only after the email actually went out (any
+    # Gmail failure above already returned via HTTPException). This stamps
+    # applied_at so the card shows a "Подано · date" marker on the next refetch.
+    await repo.mark_applied(job_id)
 
     return OutreachSendResponse(
         status="sent",

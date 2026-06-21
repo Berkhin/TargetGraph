@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.models.enums import JobStatus
 from app.models.schemas.job import JobCreate, JobRead, JobUpdate
@@ -71,6 +71,38 @@ class JobRepository(BaseRepository):
         for field, value in changes.items():
             setattr(entity, field, value)
 
+        await self._session.flush()
+        await self._session.refresh(entity)
+        return JobRead.model_validate(entity)
+
+    async def mark_applied(self, job_id: uuid.UUID) -> JobRead | None:
+        """Stamp ``applied_at`` with the server clock after a successful send.
+
+        Called once the recruiter outreach email goes out, so the card can show a
+        "Подано · date" marker. Re-sending refreshes the timestamp to the latest
+        send. Returns ``None`` if the posting is absent.
+        """
+        entity = await self._session.get(JobPosting, job_id)
+        if entity is None:
+            return None
+
+        entity.applied_at = func.now()
+        await self._session.flush()
+        await self._session.refresh(entity)
+        return JobRead.model_validate(entity)
+
+    async def soft_delete(self, job_id: uuid.UUID) -> JobRead | None:
+        """Mark a posting ``DISCARDED`` so it drops off every board.
+
+        A soft delete: the row stays in the table so the sourcing dedup
+        (``source_job_id``) still recognises it and never re-ingests it. Returns
+        ``None`` if the posting is absent.
+        """
+        entity = await self._session.get(JobPosting, job_id)
+        if entity is None:
+            return None
+
+        entity.status = JobStatus.DISCARDED
         await self._session.flush()
         await self._session.refresh(entity)
         return JobRead.model_validate(entity)

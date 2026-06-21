@@ -86,6 +86,11 @@ class JobPosting(Base):
         index=True,  # get_by_status filters on this column
     )
 
+    # Set when a recruiter outreach email is sent successfully (see the
+    # /outreach/send endpoint). Null until the user applies; drives the "Подано"
+    # marker and the response date shown on the card.
+    applied_at: Mapped[datetime.datetime | None] = mapped_column(nullable=True)
+
     created_at: Mapped[datetime.datetime] = mapped_column(
         server_default=func.now()
     )
