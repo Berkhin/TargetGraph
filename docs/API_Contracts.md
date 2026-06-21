@@ -1,55 +1,86 @@
 # API Contracts & Communication Protocols
 
-## 1. REST API (Управление сущностями)
-* **`POST /api/v1/jobs`** - Добавление новой вакансии (ссылка или сырой текст).
-* **`GET /api/v1/jobs`** - Получение списка вакансий с фильтрацией по статусам.
-* **`GET /api/v1/jobs/{job_id}`** - Получение информации о конкретной вакансии.
-* **`PATCH /api/v1/jobs/{job_id}`** - Обновление статуса и/или скора вакансии.
-* **`POST /api/v1/jobs/{job_id}/match`** (NEW) - Запуск AI-пайплайна сопоставления профиля с вакансией.
-  * **Query параметры:** `profile_id: UUID` — ID профиля кандидата для сопоставления.
-  * **Возвращает:** Обновленный объект вакансии с заполненными `match_score`, `cover_letter_draft` и `status`.
-  * **Статусы:** `MATCHED` (если скор >= 70) или `REJECTED_BY_AI` (если скор < 70).
-* **`POST /api/v1/applications/{job_id}/generate`** - Запуск пайплайна генерации документов (возвращает `202 Accepted` и Job ID для отслеживания через WS).
-* **`POST /api/v1/applications/{job_id}/send`** - Утверждение и ручной триггер отправки письма рекрутеру.
+> Live interactive schema (OpenAPI/Swagger) is auto-served at **`/docs`** and
+> **`/redoc`** by FastAPI — that is the source of truth for request/response shapes.
+> This document is a curated map of endpoints, clearly separating **implemented**
+> from **planned**.
 
-### Profiles (кандидатские профили)
-* **`GET /api/v1/profiles`** - Список всех профилей кандидата (с опытом и навыками).
-* **`GET /api/v1/profiles/active`** - Активный профиль (детерминированно первый; `404`, если профилей нет). Фронтенд использует его, чтобы получить реальный `profile_id` для вызова `/jobs/{id}/match`.
+## 1. REST API — Jobs (✅ implemented)
 
-## 2. Webhook API (Интеграция с Google Cloud Pub/Sub)
-* **`POST /api/v1/webhooks/gmail`**
-    * **Описание:** Endpoint для приема push-уведомлений от Google при поступлении новых писем.
-    * **Payload:** Стандартный конверт Pub/Sub (содержит `historyId` для запроса изменений через Gmail API).
+Router prefix `/api/v1/jobs` ([backend/app/api/v1/jobs.py](../backend/app/api/v1/jobs.py)).
 
-## 3. WebSocket API (Real-time события)
-* **Реализованный endpoint:** `ws://localhost:8000/api/v1/jobs/{job_id}/ws-match?profile_id=<UUID>`
-  — стриминг AI-пайплайна сопоставления узел за узлом (`init` → `match_profile`
-  со `score`/`reason` → per-node → `done`/`error`). Подробности и протокол кадров:
-  [Realtime_Matching_Spec.md](./Realtime_Matching_Spec.md).
-* **Планируемый endpoint:** `ws://localhost:8000/ws/pipeline-status` — общий
-  стрим статусов фоновых задач (ниже — целевой контракт `PipelineEvent`).
-* **Направление:** Server -> Client
-* **TypeScript Types (Frontend):**
+| Method & path | Function | Purpose |
+| --- | --- | --- |
+| `POST /api/v1/jobs` | `create_job` | add a posting (raw text / link) |
+| `GET /api/v1/jobs` | `list_jobs` | list with `job_status` filter |
+| `GET /api/v1/jobs/{job_id}` | `get_job` | fetch one |
+| `PATCH /api/v1/jobs/{job_id}` | `update_job_status_and_score` | update status / score |
+| `DELETE /api/v1/jobs/{job_id}` | `delete_job` | **soft-delete** → status `DISCARDED` (204) |
+| `POST /api/v1/jobs/{job_id}/match?profile_id=…` | `match_job` | run full pipeline synchronously |
+| `POST /api/v1/jobs/{job_id}/outreach/send` | `send_outreach_email` | send email + PDF via Gmail; stamps `applied_at` |
+| `WS /api/v1/jobs/{job_id}/ws-match?profile_id=…` | `match_job_ws` | streaming pipeline (see §3) |
 
-## 4. Инфраструктура и Интеграции
-    * **Frontend-Backend Sync:** WebSocket соединение для стриминга логов выполнения фоновых задач (поиск почты, LLM-генерация) в реальном времени.
-    * **Inbox Parsing:** Использование Google Cloud Pub/Sub. При поступлении входящего письма Google отправляет POST-запрос на наш Webhook, после чего FastAPI фоном скачивает письмо, прогоняет через LLM для определения статуса (interview, rejection, info) и обновляет БД. Для локальной разработки Webhook пробрасывается через ngrok или localtunnel.
+**`POST /{job_id}/match`** — query param `profile_id: UUID`. Returns the updated
+job (`match_score`, `match_reason`, `cover_letter_draft`, `tailored_cv_draft`,
+`recruiter_name`, `recruiter_email`, `status`). Status is `MATCHED` if
+`score >= score_threshold` (default **50**), else `REJECTED_BY_AI`. Unknown
+job/profile → `404`. Examples: [EXAMPLES_JOB_MATCHING.md](./EXAMPLES_JOB_MATCHING.md).
+
+**`POST /{job_id}/outreach/send`** — body `OutreachSendRequest`
+(`to_email`, `subject`, `body`, optional `attachment_filename`,
+`attachment_content_base64`). The PDF is generated **client-side** (jsPDF) and
+uploaded base64. Returns `OutreachSendResponse`
+(`{"status": "sent", "message_id": "...", "to_email": "..."}`). Gmail errors → `500`.
+
+## 2. REST API — Profiles & Contacts (✅ implemented)
+
+| Method & path | Purpose |
+| --- | --- |
+| `GET /api/v1/profiles` | list candidate profiles (with experience & skills) |
+| `GET /api/v1/profiles/active` | active profile (deterministically first; `404` if none) — frontend uses it to get a real `profile_id` for `/jobs/{id}/match` |
+| `POST /api/v1/contacts/verify-email` | **standalone** SMTP/MX/permutation email verifier — *not* part of the matching pipeline ([Email_Verification_Spec.md](./Email_Verification_Spec.md)) |
+
+## 3. WebSocket API — real-time matching (✅ implemented)
+
+```
+ws://localhost:8000/api/v1/jobs/{job_id}/ws-match?profile_id=<UUID>
+```
+
+Streams the matching pipeline node-by-node (`init` → `match_profile` with
+`score`/`reason` → per-node frames → `done` / `error`). Full frame protocol:
+[Realtime_Matching_Spec.md](./Realtime_Matching_Spec.md).
+
+## 4. Planned / not yet implemented (⏳)
+
+These are design targets, **not** in the codebase today. Do not assume they exist.
+
+* **`ws://…/ws/pipeline-status`** — a general background-task status stream
+  (target `PipelineEvent` contract below).
+* **`POST /api/v1/webhooks/gmail`** — Gmail inbox parsing via Google Cloud Pub/Sub
+  (push notifications → LLM classification of replies). *Gmail is currently
+  outbound-only; no webhook or Pub/Sub integration is implemented.*
+* **`POST /api/v1/applications/{job_id}/generate` / `/send`** — a separate
+  application-tracking resource. Today, outreach is `POST /jobs/{id}/outreach/send`
+  and "applied" state is the `applied_at` timestamp on `job_postings`.
+
+### Target `PipelineEvent` type (frontend, planned)
 
 ```typescript
 // Strict type definitions (No interfaces)
-export type PipelineStage = 
-  | "Sourcing" 
-  | "Matching" 
-  | "Email_Discovery" 
-  | "Document_Generation" 
-  | "Completed" 
+export type PipelineStage =
+  | "Sourcing"
+  | "Matching"
+  | "Email_Discovery"
+  | "Document_Generation"
+  | "Completed"
   | "Failed";
 
 export type PipelineEvent = {
   jobId: string;
   stage: PipelineStage;
-  progress: number; // 0-100
-  message: string; // например: "SMTP ping successful for alex@company.com"
-  timestamp: string; // ISO 8601
-  payload?: Record<string, unknown>; // Дополнительные данные, если нужны
+  progress: number;   // 0-100
+  message: string;
+  timestamp: string;  // ISO 8601
+  payload?: Record<string, unknown>;
 };
+```

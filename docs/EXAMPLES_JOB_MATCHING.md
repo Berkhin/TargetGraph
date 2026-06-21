@@ -56,19 +56,24 @@ curl -X POST "http://localhost:8000/api/v1/jobs/{job_id}/match" \
 1. **Input:** Получает ID вакансии и ID профиля из параметров.
 2. **Pipeline Execution:** Запускает LangGraph-пайплайн с шагами:
    - Extract Requirements (извлечение требований из описания вакансии)
-   - Match Profile (оценка соответствия профиля требованиям)
-   - Draft Documents (генерация сопроводительного письма)
-   - Review (ревью и итеративное улучшение письма)
+   - Match Profile (оценка соответствия профиля требованиям) + score-гейт
+   - Параллельно: Find Recruiter Contact (Hunter.io) ∥ Generate Tailored CV
+   - Generate Cover Letter (персонализированное письмо)
+   - Reviewer (fact-check + цикл ревизии письма, max 3)
 3. **Result Saving:** Сохраняет результаты в БД:
-   - `match_score` (0-100)
-   - `cover_letter_draft` (сгенерированное письмо)
-   - `status` (MATCHED если скор >= 70, иначе REJECTED_BY_AI)
+   - `match_score` (0-100), `match_reason`
+   - `cover_letter_draft`, `tailored_cv_draft`
+   - `recruiter_name`, `recruiter_email` (могут быть `null`)
+   - `status` (MATCHED если скор >= `score_threshold`, иначе REJECTED_BY_AI)
 4. **Return:** Возвращает обновленный объект вакансии
 
 ## Status Logic
 
-- **MATCHED** (скор >= 70) - Профиль хорошо подходит для вакансии
-- **REJECTED_BY_AI** (скор < 70) - Профиль не достаточно соответствует требованиям вакансии
+Порог `score_threshold` по умолчанию **50** (поле `GraphState`, переопределяется
+на запуск).
+
+- **MATCHED** (скор >= порога) — профиль подходит для вакансии
+- **REJECTED_BY_AI** (скор < порога) — профиль недостаточно соответствует
 
 ## Example Usage (Python)
 

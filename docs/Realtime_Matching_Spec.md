@@ -23,13 +23,16 @@ WS /api/v1/jobs/{job_id}/ws-match?profile_id=<UUID>
 | --------------- | -------------------------------------------- | ----- |
 | `init`          | `message`                                    | входные данные загружены |
 | `match_profile` | `score`, `reason`                            | сразу после узла оценки (с причиной!) |
-| `<node>`        | `message`                                    | завершение `extract_requirements` / `draft_documents` / `reviewer` |
-| `done`          | `status`, `score`, `reason`, `cover_letter_draft` | финал, затем сокет закрывается |
+| `find_recruiter_contact` | `recruiter_name`, `recruiter_email`  | контакт найден (или `None`) |
+| `<node>`        | `message`                                    | завершение `extract_requirements` / `generate_tailored_cv` / `generate_cover_letter` / `reviewer` |
+| `done`          | `status`, `score`, `reason`, `cover_letter_draft`, `tailored_cv_draft` | финал, затем сокет закрывается |
 | `error`         | `message`                                    | вакансия/профиль не найдены, ошибка пайплайна или сохранения |
 
-Узлы пайплайна, чьи границы форвардятся:
-`{extract_requirements, match_profile, draft_documents, reviewer}` (фильтр по
-`on_chain_end` в `astream_events` v2).
+Узлы пайплайна, чьи границы форвардятся (`_PIPELINE_NODES`): `extract_requirements`,
+`match_profile`, `find_recruiter_contact`, `generate_tailored_cv`,
+`generate_cover_letter`, `reviewer` (фильтр по `on_chain_end` в `astream_events`
+v2). Параллельные ветки CV ∥ контакт стримятся по мере завершения каждого узла;
+порядок их кадров не детерминирован.
 
 ## 3. Дисциплина соединений
 
@@ -39,7 +42,7 @@ WS /api/v1/jobs/{job_id}/ws-match?profile_id=<UUID>
 1. **Короткая read-сессия** — читает job + profile, затем отпускает соединение.
 2. **Прогон графа без соединения** — `astream_events`, слияние частичных
    выходов узлов в `final_state` (last-write-wins, корректно для повторного
-   `draft_documents` в цикле ревизий).
+   `generate_cover_letter` в цикле ревизий).
 3. **Короткая write-сессия** — отдельная атомарная единица работы: сохранение
    результата + `commit`.
 

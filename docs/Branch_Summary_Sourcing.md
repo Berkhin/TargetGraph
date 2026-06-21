@@ -14,8 +14,9 @@
   `source_job_id`.
 * `SourcingSettings` (`app/core/config.py`) — `APIFY_TOKEN` fail-fast, локация,
   интервал, `pages→count`, `max_runs_per_task`.
-* `app/main.py` — `AsyncIOScheduler` в lifespan (`interval`, `max_instances=1`,
-  `coalesce`).
+* `app/main.py` — `AsyncIOScheduler` в lifespan (`max_instances=1`, `coalesce`).
+  > С тех пор триггер переведён на `cron` (ежедневно 03:00 UTC) — см.
+  > [Sourcing_Spec.md](./Sourcing_Spec.md).
 * **Фикс input-бага:** актор требует `urls`, а не `searchTerms/location/pages`
   (ошибка `Field input.urls is required`).
 
