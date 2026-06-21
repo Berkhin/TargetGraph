@@ -17,7 +17,6 @@ import uuid
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import get_settings
 from app.db.database import get_session
 from app.models.schemas.profile import ProfileCreate, ProfileRead, ProfileUpdate
 from app.repositories.profile_repository import ProfileRepository
@@ -101,8 +100,7 @@ async def upload_resume(
                 detail="PDF file is empty",
             )
 
-        ai_settings = get_settings().ai
-        profile_create = await create_profile_from_resume(pdf_bytes, ai_settings)
+        profile_create = await create_profile_from_resume(pdf_bytes)
 
         if profile_create is None:
             raise HTTPException(

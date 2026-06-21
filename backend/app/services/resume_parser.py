@@ -12,9 +12,9 @@ import logging
 from typing import Any
 
 import pdfplumber
-from langchain_google_genai import ChatGoogleGenerativeAI
 from pydantic import BaseModel, Field
 
+from app.ai.llm import get_llm
 from app.core.config import AISettings
 from app.models.schemas.profile import (
     ExperienceCreate,
@@ -87,7 +87,7 @@ async def extract_text_from_pdf(pdf_bytes: bytes) -> str:
 
 
 async def parse_resume_with_llm(
-    resume_text: str, ai_settings: AISettings
+    resume_text: str,
 ) -> ParsedResume | None:
     """Parse resume text into structured data using Gemini LLM.
 
@@ -102,10 +102,7 @@ async def parse_resume_with_llm(
 
     def _parse() -> ParsedResume | None:
         try:
-            model = ChatGoogleGenerativeAI(
-                model=ai_settings.model_name,
-                temperature=ai_settings.temperature,
-            )
+            model = get_llm()
             structured_model = model.with_structured_output(ParsedResume)
             prompt = f"""Parse the following resume and extract structured information.
 Focus on:
@@ -125,7 +122,7 @@ If end_date is not specified or current, set to null."""
         except Exception as e:
             logger.error(
                 "LLM parsing failed",
-                extra={"error": str(e), "model": ai_settings.model_name},
+                extra={"error": str(e)},
             )
             return None
 
@@ -133,7 +130,7 @@ If end_date is not specified or current, set to null."""
 
 
 async def create_profile_from_resume(
-    pdf_bytes: bytes, ai_settings: AISettings
+    pdf_bytes: bytes,
 ) -> ProfileCreate | None:
     """End-to-end: extract PDF → parse with LLM → create ProfileCreate DTO.
 
@@ -147,7 +144,7 @@ async def create_profile_from_resume(
             return None
 
         # Parse with LLM
-        parsed = await parse_resume_with_llm(resume_text, ai_settings)
+        parsed = await parse_resume_with_llm(resume_text)
         if parsed is None:
             logger.warning("LLM parsing returned None")
             return None
