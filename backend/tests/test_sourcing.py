@@ -125,7 +125,7 @@ async def test_fetch_sends_expected_run_input() -> None:
                 "?keywords=%22Eng%22&location=Israel&geoId=101620260"
             ],
             "count": 25,
-            "scrapeCompany": False,
+            "scrapeCompany": True,
         }
     ]
 
@@ -225,6 +225,25 @@ def test_to_job_create_coerces_numeric_job_id_and_falls_back_to_synthetic_url() 
     # min_length=1 fields get non-empty fallbacks.
     assert job.company_name == "Unknown"
     assert job.description == "No description provided."
+
+
+def test_to_job_create_maps_employee_count() -> None:
+    # companyEmployeesCount (from scrapeCompany) maps to employee_count, coercing
+    # a numeric string and dropping junk/negative values to None.
+    assert _to_job_create({"id": "1", "companyEmployeesCount": 36275}).employee_count == 36275
+    assert _to_job_create({"id": "2", "companyEmployeesCount": "1200"}).employee_count == 1200
+    assert _to_job_create({"id": "3", "companyEmployeesCount": "n/a"}).employee_count is None
+    assert _to_job_create({"id": "4"}).employee_count is None
+
+
+def test_to_job_create_maps_company_linkedin_url() -> None:
+    # companyLinkedinUrl (from scrapeCompany) maps to company_linkedin_url; absent
+    # or blank values stay None.
+    job = _to_job_create(
+        {"id": "1", "companyLinkedinUrl": "https://www.linkedin.com/company/acme"}
+    )
+    assert job.company_linkedin_url == "https://www.linkedin.com/company/acme"
+    assert _to_job_create({"id": "2"}).company_linkedin_url is None
 
 
 def test_to_job_create_skips_result_without_job_id() -> None:

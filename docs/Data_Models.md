@@ -25,6 +25,8 @@ There are **four** tables. Recruiter contact info is stored **as columns on
 | `source_job_id` | String(512), nullable, **unique**, index | sourcing dedup key |
 | `company_website` | String(255), nullable | real employer domain (Apify) — used for Hunter |
 | `location` / `employment_type` / `seniority_level` / `salary` | String, nullable | scraper metadata ([Job_Metadata_Spec.md](./Job_Metadata_Spec.md)) |
+| `employee_count` | Integer, nullable | company headcount (Apify `companyEmployeesCount`, requires `scrapeCompany`) |
+| `company_linkedin_url` | String(512), nullable | company LinkedIn page (Apify `companyLinkedinUrl`, requires `scrapeCompany`) |
 | `match_score` | Integer, nullable | 0–100 |
 | `match_reason` | Text, nullable | score justification |
 | `cover_letter_draft` | Text, nullable | generated letter |

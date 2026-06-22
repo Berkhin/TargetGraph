@@ -64,7 +64,7 @@ https://www.linkedin.com/jobs/search/?keywords=%22AI+Engineer%22&location=Israel
 {
     "urls": [_linkedin_search_url(query, location)],
     "count": settings.pages * 25,   # у актора нет 'pages'; ~25 вакансий/страницу
-    "scrapeCompany": False,         # company_name уже есть в листинге
+    "scrapeCompany": True,          # доскрейп профиля → companyEmployeesCount
 }
 ```
 
@@ -89,6 +89,8 @@ https://www.linkedin.com/jobs/search/?keywords=%22AI+Engineer%22&location=Israel
 | `employment_type` | `employmentType`  | `None` если пусто, обрезка 100      |
 | `seniority_level` | `seniorityLevel`  | `None` если пусто, обрезка 100      |
 | `salary`          | `salary`          | `""` → `None`, обрезка 255          |
+| `employee_count`  | `companyEmployeesCount` | не-число/отриц. → `None` (только при `scrapeCompany`) |
+| `company_linkedin_url` | `companyLinkedinUrl` | `None` если пусто, обрезка 512 (только при `scrapeCompany`) |
 
 ## 4. Конфигурация (`SourcingSettings`)
 

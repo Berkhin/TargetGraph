@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ExternalLink, FileText, Trash2 } from "lucide-react";
+import { Building2, ExternalLink, FileText, Trash2 } from "lucide-react";
 import {
   Card,
   CardAction,
@@ -126,6 +126,25 @@ export function JobCard({ job, profileId, location }: JobCardProps) {
             </a>
           </Button>
 
+          {/* Link to the company's LinkedIn page; only when the scraper resolved
+              one (requires scrapeCompany on the sourcing run). */}
+          {job.company_linkedin_url ? (
+            <Button
+              asChild
+              variant="ghost"
+              size="icon"
+              aria-label="Страница компании"
+            >
+              <a
+                href={job.company_linkedin_url}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                <Building2 />
+              </a>
+            </Button>
+          ) : null}
+
           <Badge variant={STATUS_VARIANT[job.status]}>
             {STATUS_LABEL[job.status]}
           </Badge>
@@ -161,6 +180,11 @@ export function JobCard({ job, profileId, location }: JobCardProps) {
             ) : null}
             {job.salary ? (
               <Badge variant="outline">{job.salary}</Badge>
+            ) : null}
+            {job.employee_count !== null ? (
+              <Badge variant="outline">
+                {job.employee_count.toLocaleString("ru-RU")} сотрудников
+              </Badge>
             ) : null}
             {job.match_score !== null ? (
               <Badge variant="secondary">Match {job.match_score}%</Badge>

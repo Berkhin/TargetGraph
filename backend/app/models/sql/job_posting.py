@@ -45,6 +45,21 @@ class JobPosting(Base):
     #   alembic upgrade head
     company_website: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
+    # Company headcount from the Apify ``companyEmployeesCount`` field (only
+    # populated when the actor's ``scrapeCompany`` input is enabled). Nullable so
+    # existing rows and items scraped without company enrichment stay valid.
+    #
+    # New column — regenerate the schema with Alembic after changing this model:
+    #   alembic revision --autogenerate -m "add_employee_count"
+    #   alembic upgrade head
+    employee_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # The company's LinkedIn page (Apify ``companyLinkedinUrl``), surfaced as a
+    # direct link on the card. Only populated when ``scrapeCompany`` is enabled.
+    company_linkedin_url: Mapped[str | None] = mapped_column(
+        String(512), nullable=True
+    )
+
     # Stable, opaque provider id (e.g. SerpAPI's google_jobs ``job_id``) used to
     # deduplicate sourced postings. Nullable so manually-created rows (API / test
     # script) remain valid; unique + indexed so dedup lookups are cheap and a

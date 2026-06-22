@@ -35,6 +35,12 @@ class JobBase(BaseModel):
     # company domain used for the Hunter.io recruiter lookup. Inherited by
     # JobCreate and JobRead.
     company_website: str | None = Field(default=None, max_length=255)
+    # Company headcount (Apify ``companyEmployeesCount``); null when the item was
+    # scraped without company enrichment. Inherited by JobCreate and JobRead.
+    employee_count: int | None = Field(default=None, ge=0)
+    # The company's LinkedIn page (Apify ``companyLinkedinUrl``); null without
+    # company enrichment. Inherited by JobCreate and JobRead.
+    company_linkedin_url: str | None = Field(default=None, max_length=512)
     # Cold-outreach contact resolved during matching (Hunter.io). Both inherited
     # by JobCreate and JobRead; null until find_recruiter_contact resolves one.
     recruiter_name: str | None = Field(default=None, max_length=255)
@@ -73,6 +79,8 @@ class JobUpdate(BaseModel):
     seniority_level: str | None = Field(default=None, max_length=100)
     salary: str | None = Field(default=None, max_length=255)
     company_website: str | None = Field(default=None, max_length=255)
+    employee_count: int | None = Field(default=None, ge=0)
+    company_linkedin_url: str | None = Field(default=None, max_length=512)
     recruiter_name: str | None = Field(default=None, max_length=255)
     recruiter_email: str | None = Field(default=None, max_length=255)
 

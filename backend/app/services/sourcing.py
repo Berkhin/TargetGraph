@@ -122,6 +122,22 @@ def _truncate(value: str | None, limit: int) -> str | None:
     return value[:limit] if value else None
 
 
+def _coerce_int(value: object) -> int | None:
+    """Best-effort coerce an Apify value to a non-negative ``int``, else ``None``.
+
+    ``companyEmployeesCount`` usually arrives as an int but a build may emit it
+    as a numeric string; anything non-numeric or negative maps to ``None`` so a
+    junk value never reaches the column.
+    """
+    if value is None:
+        return None
+    try:
+        coerced = int(value)
+    except (TypeError, ValueError):
+        return None
+    return coerced if coerced >= 0 else None
+
+
 def _run_field(run: object, attr: str, alias: str) -> object:
     """Read a field off an actor run regardless of apify-client major version.
 
@@ -172,9 +188,10 @@ async def fetch_jobs_from_apify(
         "urls": [_linkedin_search_url(query, location)],
         # No ``pages`` input on this actor — bound results via ``count`` instead.
         "count": settings.pages * _RESULTS_PER_PAGE,
-        # Skip per-company profile scraping: company_name is already on the job
-        # listing, and the extra fetch costs more container time for data we drop.
-        "scrapeCompany": False,
+        # Scrape the per-company profile so items carry company metadata
+        # (``companyEmployeesCount`` -> employee_count on the card). This costs
+        # extra container time per run but is the only source of the headcount.
+        "scrapeCompany": True,
     }
 
     logger.info(
@@ -273,4 +290,10 @@ def _to_job_create(raw: dict) -> JobCreate | None:
         # The employer's own website — used downstream for an accurate Hunter.io
         # recruiter lookup.
         company_website=_truncate(_first(raw, "companyWebsite"), 255),
+        # Company headcount — only present when ``scrapeCompany`` is enabled.
+        employee_count=_coerce_int(raw.get("companyEmployeesCount")),
+        # The company's LinkedIn page — only present when ``scrapeCompany`` is on.
+        company_linkedin_url=_truncate(
+            _first(raw, "companyLinkedinUrl", "companyUrl"), 512
+        ),
     )
