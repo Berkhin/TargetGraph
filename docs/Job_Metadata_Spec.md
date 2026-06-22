@@ -24,6 +24,8 @@
 | `employment_type` | `String(100)` | `str \| None`  | `employmentType`      |
 | `seniority_level` | `String(100)` | `str \| None`  | `seniorityLevel`      |
 | `salary`          | `String(255)` | `str \| None`  | `salary`              |
+| `employee_count`  | `Integer`     | `int \| None`  | `companyEmployeesCount` (нужен `scrapeCompany`) |
+| `company_linkedin_url` | `String(512)` | `str \| None` | `companyLinkedinUrl` (нужен `scrapeCompany`) |
 
 ## 3. Правила маппинга (защита от падений)
 
@@ -35,8 +37,10 @@
 ## 4. Frontend
 
 `JobCard.tsx` рендерит каждое непустое поле как `<Badge variant="outline">`
-(`location`, `employment_type`, `seniority_level`, `salary`); `null`-значения не
-выводятся. Контракт `Job` в `contracts/job.ts` зеркалит `JobRead` 1:1.
+(`location`, `employment_type`, `seniority_level`, `salary`, `employee_count` →
+«N сотрудников»); `null`-значения не выводятся. `company_linkedin_url` выводится
+не бейджем, а отдельной кнопкой-иконкой (LinkedIn компании) в `CardAction`, если
+не `null`. Контракт `Job` в `contracts/job.ts` зеркалит `JobRead` 1:1.
 
 ## 5. Миграция
 

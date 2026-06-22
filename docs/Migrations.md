@@ -24,7 +24,11 @@ a8b6c7d8e9f0  add_filtered_out_status
       │
 b9c8d7e6f5a4  add_applied_at
       │
-c0d9e8f7a6b5  add_discarded_status                      (head)
+c0d9e8f7a6b5  add_discarded_status
+      │
+c1d2e3f4a5b6  add_employee_count
+      │
+d2e3f4a5b6c7  add_company_linkedin_url                 (head)
 ```
 
 | Revision        | Что добавляет | Колонки / значения |
@@ -39,6 +43,8 @@ c0d9e8f7a6b5  add_discarded_status                      (head)
 | `777c6c8d6179`  | Контакт рекрутёра | `recruiter_name`, `recruiter_email` (`String(255)`) |
 | `b9c8d7e6f5a4`  | Отметка отклика | `applied_at` (`DateTime`, nullable) |
 | `c0d9e8f7a6b5`  | Статус удаления | значение `DISCARDED` в enum `job_status` |
+| `c1d2e3f4a5b6`  | Размер компании | `employee_count` (`Integer`, nullable) |
+| `d2e3f4a5b6c7`  | LinkedIn компании | `company_linkedin_url` (`String(512)`, nullable) |
 
 > **Enum-ревизии (`a8b6c7d8e9f0`, `c0d9e8f7a6b5`)**: на Postgres —
 > `ALTER TYPE ... ADD VALUE IF NOT EXISTS` (вне транзакции); на SQLite (dev/test) —

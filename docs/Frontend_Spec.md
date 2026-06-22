@@ -67,8 +67,8 @@ App.tsx / main.tsx    # роутер + провайдеры (QueryClient, Toaste
 * **Удаление карточки:** soft-delete через `DELETE /jobs/{id}` (статус
   `DISCARDED`), затем инвалидация кэша.
 * **Метаданные:** `JobCard` выводит `location` / `employment_type` /
-  `seniority_level` / `salary` как `Badge`, если не `null`
-  (см. [Job_Metadata_Spec.md](./Job_Metadata_Spec.md)).
+  `seniority_level` / `salary` / `employee_count` («N сотрудников») как `Badge`,
+  если не `null` (см. [Job_Metadata_Spec.md](./Job_Metadata_Spec.md)).
 
 ## 5. Запуск
 
