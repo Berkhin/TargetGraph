@@ -27,6 +27,8 @@ dependencies = [
     "google-api-python-client>=2.0",  # Gmail REST client for cold outreach
     "google-auth-oauthlib>=1.0",      # InstalledAppFlow desktop OAuth consent
     "google-auth-httplib2>=0.2",      # httplib2 transport adapter for google-auth
+    "pdfplumber>=0.10",               # PDF parsing and text extraction
+    "python-multipart>=0.0.6",        # Multipart form data parsing for file uploads
 ]
 
 [project.optional-dependencies]

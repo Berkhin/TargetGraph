@@ -55,3 +55,16 @@ export async function sendOutreachEmail(
   );
   return data;
 }
+
+// POST /jobs/sourcing/trigger — manually trigger the sourcing job.
+// Returns 202 (Accepted) immediately; the job runs asynchronously in background.
+export async function triggerSourcing(): Promise<{
+  status: string;
+  message: string;
+}> {
+  const { data } = await apiClient.post<{
+    status: string;
+    message: string;
+  }>("/jobs/sourcing/trigger");
+  return data;
+}

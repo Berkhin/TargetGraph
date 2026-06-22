@@ -11,4 +11,16 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  // Mirror the prod Nginx proxy locally: relative /api calls (REST + WS) are
+  // forwarded to the FastAPI dev server, so the frontend code is host-agnostic
+  // in dev and prod alike.
+  server: {
+    proxy: {
+      "/api": {
+        target: "http://localhost:8000",
+        changeOrigin: true,
+        ws: true,
+      },
+    },
+  },
 })

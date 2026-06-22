@@ -41,10 +41,15 @@ type StreamFrame =
 // lives at /jobs/{id}/ws-match?profile_id=... on the same versioned API root
 // (see app/api/v1/jobs.py).
 function buildStreamUrl(jobId: string, profileId: string): string {
-  const base =
-    import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000/api/v1";
-  // http → ws, https → wss.
-  const wsBase = base.replace(/^http/, "ws");
+  const base = import.meta.env.VITE_API_BASE_URL ?? "/api/v1";
+  // Absolute override (e.g. http://host:8000/api/v1): just swap the scheme.
+  // Relative default (/api/v1): WebSocket needs an absolute URL, so borrow the
+  // current page's scheme + host so the handshake goes through the same proxy.
+  const wsBase = /^https?:/.test(base)
+    ? base.replace(/^http/, "ws")
+    : `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${
+        window.location.host
+      }${base}`;
   return `${wsBase}/jobs/${jobId}/ws-match?profile_id=${profileId}`;
 }
 
