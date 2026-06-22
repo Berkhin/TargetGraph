@@ -139,13 +139,15 @@ export function useMatchJobStream() {
               ? `Отклик готов (совпадение ${frame.score}%)`
               : "Вакансия отклонена ИИ",
           );
-          // Keep THIS card's terminal/log on screen — deliberately do NOT
-          // invalidate the NEW feed, or the just-matched card would vanish from
-          // the board mid-view. The NEW list refreshes on remount/refocus.
-          // The "Отклики" page (MATCHED) is a different view, so refresh it: a
-          // MATCHED result must show up there without a manual reload.
+          // A run changes the posting's status, so refresh the board: the job
+          // leaves the NEW list and, on a match, joins the MATCHED list. The
+          // card is keyed on updated_at, so it remounts into the right feed
+          // section (NEW → «Готовые к отправке») with the freshly generated
+          // drafts. The completed terminal log is dropped on that remount, but
+          // the success toast already reported the outcome.
           setPhase("done");
           closeSocket();
+          void queryClient.invalidateQueries({ queryKey: jobsKeys.new() });
           if (frame.status === "MATCHED") {
             void queryClient.invalidateQueries({ queryKey: jobsKeys.matched() });
           }

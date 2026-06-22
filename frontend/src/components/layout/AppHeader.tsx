@@ -11,7 +11,7 @@ type NavItem = {
 
 const NAV: NavItem[] = [
   { to: "/", label: "Лента вакансий", end: true },
-  { to: "/cover-letters", label: "Отклики" },
+  { to: "/applications", label: "Отклики" },
   { to: "/profile", label: "Настройки профиля" },
 ];
 

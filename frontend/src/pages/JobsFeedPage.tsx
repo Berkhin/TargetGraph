@@ -3,9 +3,11 @@ import { JobCard } from "@/features/jobs-board/ui/JobCard";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { useJobs } from "@/features/jobs-board/hooks/useJobs";
+import { useMatchedJobs } from "@/features/jobs-board/hooks/useMatchedJobs";
 import { useActiveProfile } from "@/features/profiles/hooks/useActiveProfile";
 import { useTriggerSourcing } from "@/features/jobs-board/hooks/useTriggerSourcing";
 import { getApiErrorMessage } from "@/shared/api/errors";
+import type { JobRead } from "@/features/jobs-board/api/types";
 
 function JobCardSkeleton() {
   return (
@@ -18,10 +20,35 @@ function JobCardSkeleton() {
   );
 }
 
+// A card seeds its editable drafts from props at mount, so a re-match that
+// rewrites them must remount the card — key on updated_at as well as id.
+function cardKey(job: JobRead): string {
+  return `${job.id}:${job.updated_at}`;
+}
+
 export function JobsFeedPage() {
-  const { data: jobs, isPending, isError, error } = useJobs();
+  // Two queries feed one board: NEW postings awaiting matching, and MATCHED
+  // postings ready to send. The MATCHED query shares its key with the "Отклики"
+  // table, so TanStack serves both from one cache entry.
+  const newJobsQuery = useJobs();
+  const matchedQuery = useMatchedJobs();
+  // Active profile drives the AI matching call; until it loads (or if none
+  // exists) the generate/regenerate buttons stay disabled.
   const { data: profile } = useActiveProfile();
+  const profileId = profile?.id ?? null;
+  // Manual sourcing trigger behind the header "Find Jobs" button.
   const triggerSourcing = useTriggerSourcing();
+
+  const isPending = newJobsQuery.isPending || matchedQuery.isPending;
+  const isError = newJobsQuery.isError || matchedQuery.isError;
+  const error = newJobsQuery.error ?? matchedQuery.error;
+
+  const newJobs = newJobsQuery.data ?? [];
+  // Sent postings live only in the "Отклики" table; the board shows MATCHED
+  // postings that are still awaiting an outreach send (applied_at == null).
+  const readyJobs = (matchedQuery.data ?? []).filter(
+    (job) => job.applied_at == null,
+  );
 
   return (
     <main className="mx-auto px-4 py-10">
@@ -55,13 +82,43 @@ export function JobsFeedPage() {
         <p className="text-destructive">
           Не удалось загрузить вакансии: {getApiErrorMessage(error)}
         </p>
-      ) : jobs.length === 0 ? (
+      ) : newJobs.length === 0 && readyJobs.length === 0 ? (
         <p className="text-muted-foreground">Новых вакансий нет.</p>
       ) : (
-        <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
-          {jobs.map((job) => (
-            <JobCard key={job.id} job={job} profileId={profile?.id ?? null} />
-          ))}
+        <div className="space-y-12">
+          {readyJobs.length > 0 ? (
+            <section>
+              <h2 className="mb-4 text-xl font-semibold tracking-tight">
+                Готовые к отправке
+              </h2>
+              <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+                {readyJobs.map((job) => (
+                  <JobCard
+                    key={cardKey(job)}
+                    job={job}
+                    profileId={profileId}
+                  />
+                ))}
+              </div>
+            </section>
+          ) : null}
+
+          {newJobs.length > 0 ? (
+            <section>
+              <h2 className="mb-4 text-xl font-semibold tracking-tight">
+                Новые
+              </h2>
+              <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
+                {newJobs.map((job) => (
+                  <JobCard
+                    key={cardKey(job)}
+                    job={job}
+                    profileId={profileId}
+                  />
+                ))}
+              </div>
+            </section>
+          ) : null}
         </div>
       )}
     </main>
