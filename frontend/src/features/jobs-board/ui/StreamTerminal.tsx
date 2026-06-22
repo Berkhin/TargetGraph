@@ -5,14 +5,14 @@ export type StreamTerminalProps = {
   logs: string[];
   // Current run phase; colours the last line green on "done", red on "error".
   phase: StreamPhase;
-  // Tailwind height utility for the scroll area, so each card can size it to
-  // fit its layout (the compact JobCard vs the wider CoverLetterCard).
+  // Tailwind height utility for the scroll area, so the card can size it to fit
+  // its layout (the compact NEW card vs the taller matched card).
   heightClassName?: string;
 };
 
 // The streaming "terminal" shown while the AI pipeline runs and after it
-// finishes, so the log stays readable. Shared by JobCard and CoverLetterCard so
-// the "regenerate" action looks identical on both.
+// finishes, so the log stays readable. Used by JobCard in both its generate
+// (NEW) and regenerate (MATCHED) states.
 export function StreamTerminal({
   logs,
   phase,
