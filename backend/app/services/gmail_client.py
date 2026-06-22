@@ -111,12 +111,44 @@ class GmailClient:
             )
             creds = flow.run_local_server(port=0)
 
-        # Persist the (new or refreshed) token atomically (write-temp + replace)
-        # so an interrupted write can never leave a half-written token.json.
-        tmp_path = Path(f"{token_path}.tmp")
-        tmp_path.write_text(creds.to_json(), encoding="utf-8")
-        tmp_path.replace(token_path)
+        # Persist the (new or refreshed) token for the next process start. This
+        # is best-effort: we already hold valid in-memory creds, so a failed
+        # write must never abort the caller's send (see _persist_token).
+        self._persist_token(creds)
         return creds
+
+    def _persist_token(self, creds: Credentials) -> None:
+        """Best-effort write of the (new/refreshed) token to disk.
+
+        Prefer an atomic temp-write + rename so an interrupted write can never
+        leave a half-written token.json. When the rename can't land on the
+        target — e.g. token.json is a bind-mounted single file or sits on a
+        Docker overlay filesystem, where ``os.replace()`` raises EBUSY ("Device
+        or resource busy") — fall back to an in-place write (rewriting a
+        bind-mounted file's contents is fine; only renaming *onto* it is not).
+        If even that fails, log and carry on: the live creds are already valid,
+        so persistence is an optimisation, not a precondition for sending.
+        """
+        token_path = self._settings.token_path
+        token_json = creds.to_json()
+        tmp_path = Path(f"{token_path}.tmp")
+        try:
+            tmp_path.write_text(token_json, encoding="utf-8")
+            tmp_path.replace(token_path)
+            return
+        except OSError as exc:
+            logger.warning(
+                "gmail_token_atomic_write_failed", extra={"error": str(exc)}
+            )
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        try:
+            Path(token_path).write_text(token_json, encoding="utf-8")
+        except OSError:
+            logger.exception("gmail_token_persist_failed")
 
     def _get_service(self) -> Resource:
         """Lazily build and cache the Gmail API service (authenticating first)."""
